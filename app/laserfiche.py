@@ -145,7 +145,7 @@ class LaserficheClient:
         while pending and len(out) < limit:
             fid = pending.pop(0)
             url = f"{self._repo_url}/Entries/{fid}/Folder/Children"
-            params: dict | None = {"$select": self._DOC_SELECT, "$top": "200"}
+            params: dict | None = None  # default listing; this API Server build rejects $select/$top here
             while url and len(out) < limit:
                 r = self._http.get(url, headers=self._headers(), params=params)
                 if r.status_code == 401:
@@ -166,7 +166,7 @@ class LaserficheClient:
         return out
 
     def get_entry(self, entry_id: int) -> dict:
-        return self._req("GET", f"/Entries/{entry_id}", params={"$select": self._DOC_SELECT})
+        return self._req("GET", f"/Entries/{entry_id}")
 
     def entry_fields(self, entry_id: int) -> dict[str, list[str]]:
         vals = self._req("GET", f"/Entries/{entry_id}/Fields").get("value", [])
@@ -175,19 +175,29 @@ class LaserficheClient:
     def export_pdf(self, entry_id: int, entry: dict | None = None) -> bytes:
         """PDF bytes for an existing document: the edoc if it is a PDF, otherwise the LF pages rendered to PDF."""
         entry = entry or self.get_entry(entry_id)
-        is_pdf_edoc = entry.get("isElectronicDocument") and (
-            (entry.get("mimeType") or "").lower() == "application/pdf" or (entry.get("extension") or "").lower() == "pdf")
-        body = {"part": "Edoc"} if is_pdf_edoc else {"part": "Image", "imageOptions": {"format": "PDF", "includeAnnotations": False}}
-        link = self._req("POST", f"/Entries/{entry_id}/Export", json=body).get("value")
-        if not link:
-            raise LaserficheError(f"Export {entry_id} returned no download link")
-        r = self._http.get(link, headers=self._headers(), follow_redirects=True)
-        if r.status_code >= 400:
-            raise LaserficheError(f"Download {entry_id} -> {r.status_code}: {r.text[:200]}")
-        data = r.content
-        if not data.startswith(b"%PDF"):
-            raise LaserficheError(f"Export {entry_id} did not return a PDF (got {r.headers.get('content-type')})")
-        return data
+        has_edoc = entry.get("isElectronicDocument")
+        ext = (entry.get("extension") or "").lower()
+        mime = (entry.get("mimeType") or "").lower()
+        # Try the edoc first when it is (or may be) a PDF; fall back to rendering the LF pages to PDF.
+        attempts = []
+        if has_edoc is not False and (ext in ("pdf", "") and mime in ("application/pdf", "")):
+            attempts.append({"part": "Edoc"})
+        attempts.append({"part": "Image", "imageOptions": {"format": "PDF", "includeAnnotations": False}})
+        last = ""
+        for body in attempts:
+            try:
+                link = self._req("POST", f"/Entries/{entry_id}/Export", json=body).get("value")
+                if not link:
+                    last = "no download link"; continue
+                r = self._http.get(link, headers=self._headers(), follow_redirects=True)
+                if r.status_code >= 400:
+                    last = f"download {r.status_code}"; continue
+                if r.content.startswith(b"%PDF"):
+                    return r.content
+                last = f"not a PDF ({r.headers.get('content-type')})"
+            except LaserficheError as e:
+                last = str(e)
+        raise LaserficheError(f"Export {entry_id} failed: {last}")
 
     def set_template(self, entry_id: int, template: str) -> None:
         # v2: PUT /Entries/{id}/Template  {"templateName": ...}
