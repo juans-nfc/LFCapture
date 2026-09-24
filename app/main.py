@@ -216,6 +216,10 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
     missing = [f["name"] for f in tdef["fields"] if f["required"] and not [v for v in fields.get(f["name"], []) if v]]
     if missing:
         raise HTTPException(400, "Required fields missing: " + ", ".join(missing))
+    too_long = [f"{f['name']} ({max(len(v) for v in fields.get(f['name'], []))} chars, max {f['length']})"
+                for f in tdef["fields"] if f.get("length") and fields.get(f["name"]) and any(len(v) > f["length"] for v in fields[f["name"]])]
+    if too_long:
+        raise HTTPException(400, "Too long for Laserfiche: " + "; ".join(too_long))
     meta = json.loads((d / "meta.json").read_text())
     if meta.get("lf_entry_id"):
         entry_id = int(meta["lf_entry_id"])

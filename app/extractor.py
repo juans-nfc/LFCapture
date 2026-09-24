@@ -30,6 +30,8 @@ def _field_schema(f: dict) -> dict:
     desc = f"{f['name']} ({hint})"
     if f.get("description"):
         desc += f": {f['description']}"
+    if f.get("length"):
+        desc += f". Max {f['length']} characters — shorten or abbreviate if needed."
     if f["list"]:
         desc += ". Allowed: " + ", ".join(f["list"]) + ". Leave OUT unless one of these values is actually printed on the document."
     if f["required"]:

@@ -308,7 +308,7 @@ function fieldRow(fd, values) {
     const chips = () => { val.querySelectorAll('.chip').forEach(c => c.remove());
       values.forEach((v, i) => { const c = document.createElement('span'); c.className = 'chip'; c.innerHTML = `${esc(v)}<button title="Remove">×</button>`;
         c.querySelector('button').onclick = () => { values.splice(i, 1); chips(); }; val.insertBefore(c, val.firstChild); }); };
-    const inp = document.createElement('input'); inp.placeholder = 'Add value, press Enter';
+    const inp = document.createElement('input'); inp.placeholder = 'Add value, press Enter'; if (fd.length) inp.maxLength = fd.length;
     inp.onkeydown = e => { if (e.key === 'Enter' && inp.value.trim()) { values.push(inp.value.trim()); inp.value = ''; chips(); e.preventDefault(); } };
     val.appendChild(inp); chips();
     row.getValues = () => { if (inp.value.trim()) { values.push(inp.value.trim()); inp.value = ''; } return values.slice(); };
@@ -318,6 +318,8 @@ function fieldRow(fd, values) {
   } else {
     const inp = document.createElement('input'); inp.value = values[0] || ''; inp.placeholder = fd.required ? 'required' : '';
     if (fd.type === 'Date') inp.type = 'date';
+    if (fd.length) { inp.maxLength = fd.length; inp.title = `Max ${fd.length} characters`;
+      if ((values[0] || '').length > fd.length) { inp.value = values[0].slice(0, fd.length); inp.classList.add('missing'); inp.title = `Trimmed to ${fd.length} characters — check it`; } }
     val.appendChild(inp); row.getValues = () => inp.value ? [inp.value] : [];
   }
   return row;
