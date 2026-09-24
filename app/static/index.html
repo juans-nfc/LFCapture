@@ -157,17 +157,19 @@ function render() {
   const f = $('#form'); f.innerHTML = '';
   if (!has) return;
 
-  const t = templates.find(x => x.name === job.template) || templates[0];
-  const sure = job.confidence >= 0.8;
+  job.fields = job.fields || {};
+  const t = templates.find(x => x.name === job.template) || null;
+  const sure = !!t && job.confidence >= 0.8;
   f.insertAdjacentHTML('beforeend', `
     <p class="summary">${esc(job.summary || 'Document read.')}</p>
-    <p class="verdict ${sure ? '' : 'unsure'}">${sure ? 'Confident about the template and key fields.' : 'Not sure about this one — check the template and fields before saving.'}</p>
+    <p class="verdict ${sure ? '' : 'unsure'}">${sure ? 'Confident about the template and key fields.' : (t ? 'Not sure about this one — check the template and fields before saving.' : 'No template chosen yet — pick one and the fields will be read.')}</p>
     ${job.notes ? `<p class="notes">${esc(job.notes)}</p>` : ''}
     <div class="row template"><label>Template</label>
-      <select id="tpl">${templates.map(x => `<option ${x.name === t.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+      <select id="tpl"><option value="" ${t ? '' : 'selected'} disabled>— choose a template —</option>${templates.map(x => `<option ${t && x.name === t.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
     <div class="row"><label>File name</label><input id="fname" value="${esc(job.suggested_filename || job.source.replace(/\.pdf$/i, ''))}"></div>
   `);
-  for (const fd of t.fields) f.appendChild(fieldRow(fd, job.fields[fd.name] || []));
+  if (t) for (const fd of t.fields) f.appendChild(fieldRow(fd, job.fields[fd.name] || []));
+  $('#save').disabled = !t;
 
   $('#tpl').onchange = async () => {
     busy(true); setStatus('Re-reading with the new template…');
@@ -205,6 +207,7 @@ function fieldRow(fd, values) {
 
 async function save() {
   const t = templates.find(x => x.name === $('#tpl').value);
+  if (!t) return setStatus('Pick a template first', 'err');
   const fields = {}; let missing = false;
   for (const row of document.querySelectorAll('.row[data-field]')) {
     const v = row.getValues(); fields[row.dataset.field] = v;
@@ -230,8 +233,10 @@ document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.ke
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 (async () => {
-  try { await loadTemplates(); await nextFromQueue(); setInterval(() => { if (!job) nextFromQueue(); else loadQueue(); }, 15000); }
-  catch (e) { setStatus(e.message, 'err'); $('#queue').textContent = 'Laserfiche unreachable'; }
+  try { await loadTemplates(); }
+  catch (e) { setStatus(e.message, 'err'); $('#queue').textContent = 'Laserfiche unreachable'; return; }
+  try { await nextFromQueue(); } catch (e) { setStatus(e.message, 'err'); }
+  setInterval(() => { if (!job && $('#busy').hidden) nextFromQueue().catch(() => {}); else loadQueue().catch(() => {}); }, 15000);
 })();
 </script>
 </body>
