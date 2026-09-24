@@ -9,6 +9,7 @@ Ref: developer.laserfiche.com -> Self-Hosted API Server / Import Documents (v2)
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -135,7 +136,19 @@ class LaserficheClient:
                                 files={"file": (file_name, pdf, "application/pdf"), "request": (None, json.dumps(body), "application/json")})
         if r.status_code >= 400:
             raise LaserficheError(f"Import failed ({r.status_code}): {r.text[:500]}")
-        return int(r.json().get("id") or 0)
+        entry_id = int(r.json().get("id") or 0)
+        if entry_id and self.generate_pages and not self.keep_pdf:
+            self._drop_edoc_if_present(entry_id)
+        return entry_id
+
+    def _drop_edoc_if_present(self, entry_id: int) -> None:
+        """Some API Server builds ignore keepPdfAfterImport; make sure only the LF pages remain."""
+        try:
+            e = self._req("GET", f"/Entries/{entry_id}")
+            if e.get("isElectronicDocument") and (e.get("pageCount") or 0) > 0:
+                self._req("DELETE", f"/Entries/{entry_id}/Edoc")
+        except LaserficheError as exc:  # never fail the import over this
+            logging.getLogger("lf-capture").warning("could not remove edoc from %s: %s", entry_id, exc)
 
     # ---- existing documents (backfill) --------------------------------
     _DOC_SELECT = "id,name,fullPath,folderPath,entryType,templateName,templateId,extension,mimeType,pageCount,isElectronicDocument"
