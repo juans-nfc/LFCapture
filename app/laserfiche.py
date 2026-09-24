@@ -213,3 +213,26 @@ class LaserficheClient:
         if template != (current_template or ""):
             self.set_template(entry_id, template)
         self.set_fields(entry_id, fields)
+
+    def list_folders(self, folder_path: str) -> dict:
+        """Subfolders (and a document count) of one folder, for the folder browser. Root is "\\"."""
+        path = folder_path.strip() or "\\"
+        root_id = 1 if path == "\\" else self.entry_id_by_path(path)
+        folders, docs = [], 0
+        url = f"{self._repo_url}/Entries/{root_id}/Folder/Children"
+        while url:
+            r = self._http.get(url, headers=self._headers())
+            if r.status_code == 401:
+                self._token = None
+                r = self._http.get(url, headers=self._headers())
+            if r.status_code >= 400:
+                raise LaserficheError(f"Children {root_id} -> {r.status_code}: {r.text[:300]}")
+            data = r.json()
+            for e in data.get("value", []):
+                if e.get("entryType") == "Folder":
+                    folders.append({"id": e["id"], "name": e.get("name"), "path": e.get("fullPath")})
+                elif e.get("entryType") == "Document":
+                    docs += 1
+            url = data.get("@odata.nextLink")
+        folders.sort(key=lambda f: (f["name"] or "").lower())
+        return {"path": path, "folders": folders, "documents": docs}

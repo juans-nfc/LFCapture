@@ -252,6 +252,14 @@ def api_backfill_scan(req: ScanRequest):
          "pages": d.get("pageCount"), "queued": d["id"] in _bf_seen} for d in docs]}
 
 
+@app.get("/api/lf/folders")
+def api_lf_folders(path: str = "\\"):
+    try:
+        return lf.list_folders(path)
+    except LaserficheError as e:
+        raise HTTPException(502, str(e))
+
+
 class QueueRequest(BaseModel):
     entry_ids: list[int]
 

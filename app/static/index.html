@@ -78,6 +78,16 @@
   #bf th { text-align: left; color: var(--muted); font-weight: 400; padding: 8px 6px; border-bottom: 1px solid var(--rule); position: sticky; top: 0; background: var(--pane); }
   #bf td { padding: 6px; border-bottom: 1px solid var(--rule); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
   #bf .foot { border-top: 1px solid var(--rule); padding: 12px 18px; display: flex; gap: 10px; align-items: center; color: var(--muted); }
+  /* folder browser */
+  #browse { position: absolute; top: 58px; left: 18px; width: min(560px, 90vw); max-height: 60vh; background: var(--pane); border: 1px solid var(--rule); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.12); display: flex; flex-direction: column; z-index: 10; }
+  #browse .crumb { padding: 10px 14px; border-bottom: 1px solid var(--rule); display: flex; gap: 8px; align-items: center; font-size: 15px; }
+  #browse .crumb code { background: #eef2ee; padding: 2px 6px; border-radius: 3px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #browse ul { list-style: none; margin: 0; padding: 6px 0; overflow: auto; flex: 1; }
+  #browse li { padding: 7px 14px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
+  #browse li:hover { background: #f2f4f1; }
+  #browse li .ico { color: var(--amber); }
+  #browse .empty { color: var(--muted); padding: 14px; }
+  #browse .actions { border-top: 1px solid var(--rule); padding: 10px 14px; display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 15px; }
   .lfpath { color: var(--muted); font-size: 15px; margin: -10px 0 14px; }
 
   @media (max-width: 800px) {
@@ -103,10 +113,16 @@
     <div class="head">
       <strong>Backfill from Laserfiche</strong>
       <input id="bffolder" type="text" placeholder="\Sales\Orders\80552-00  (folder path in Laserfiche)">
+      <button class="btn" id="bfbrowse" title="Browse Laserfiche folders">Browse…</button>
       <label><input id="bfrec" type="checkbox"> include subfolders</label>
       <label><select id="bffilter"><option value="1">documents with no template</option><option value="0">all documents</option></select></label>
       <button class="btn" id="bfscan">Scan</button>
       <button class="btn" id="bfclose">Close</button>
+    </div>
+    <div id="browse" hidden>
+      <div class="crumb"><button class="btn" id="brup" title="Up one level">↑</button><code id="brpath">\</code></div>
+      <ul id="brlist"></ul>
+      <div class="actions"><span id="brinfo"></span><span style="flex:1"></span><button class="btn" id="brcancel">Cancel</button><button class="save" id="bruse" style="flex:0 0 auto">Use this folder</button></div>
     </div>
     <div class="list"><table id="bftable"></table></div>
     <div class="foot">
@@ -269,6 +285,25 @@ $('#discard').onclick = async () => { if (confirm('Discard this document? It mov
 $('#refresh').onclick = async () => { await loadTemplates(true); setStatus(`${templates.length} templates loaded`, 'ok'); render(); };
 for (const id of ['#upload', '#upload2']) $(id).onchange = e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('file', f); extract(fd); e.target.value = ''; };
 document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && job) save(); });
+// ---- folder browser ----
+let brCur = '\\';
+async function brLoad(path) {
+  $('#brlist').innerHTML = '<li class="empty">Loading…</li>'; $('#brinfo').textContent = '';
+  try {
+    const r = await api('api/lf/folders?path=' + encodeURIComponent(path));
+    brCur = r.path; $('#brpath').textContent = brCur;
+    $('#brlist').innerHTML = r.folders.length
+      ? r.folders.map(f => `<li data-path="${esc(f.path)}"><span class="ico">▸</span>${esc(f.name)}</li>`).join('')
+      : '<li class="empty">No subfolders</li>';
+    $('#brinfo').textContent = `${r.documents} document${r.documents === 1 ? '' : 's'} here · ${r.folders.length} subfolder${r.folders.length === 1 ? '' : 's'}`;
+    document.querySelectorAll('#brlist li[data-path]').forEach(li => li.onclick = () => brLoad(li.dataset.path));
+  } catch (e) { $('#brlist').innerHTML = `<li class="empty">${esc(e.message)}</li>`; }
+}
+$('#bfbrowse').onclick = () => { $('#browse').hidden = false; brLoad($('#bffolder').value.trim() || '\\'); };
+$('#brup').onclick = () => brLoad(brCur === '\\' ? '\\' : brCur.replace(/\\[^\\]*$/, '') || '\\');
+$('#brcancel').onclick = () => { $('#browse').hidden = true; };
+$('#bruse').onclick = () => { $('#bffolder').value = brCur; $('#browse').hidden = true; $('#bfscan').click(); };
+
 // ---- backfill panel ----
 let bfDocs = [];
 $('#bfopen').onclick = () => { $('#bf').hidden = false; $('#bffolder').focus(); pollBf(); };
