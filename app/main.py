@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import queue
@@ -13,13 +14,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from . import extractor, mailbox  # noqa: E402
 from .laserfiche import LaserficheClient, LaserficheError  # noqa: E402
+from . import users  # noqa: E402
 
 INBOX = Path(os.environ.get("INBOX_DIR", "./inbox"))
 WORK = Path(os.environ.get("WORK_DIR", "./work"))
@@ -31,7 +33,7 @@ for p in (INBOX, WORK, DONE, FAILED):
 AUTO_SAVE = float(os.environ.get("AUTO_SAVE_CONFIDENCE", "0") or 0)
 
 app = FastAPI(title="LF Capture")
-lf = LaserficheClient()
+_svc = users.service_client()          # optional; only the mailbox path uses it
 _lock = threading.Lock()
 _templates: list[dict] = []
 _templates_at = 0.0
@@ -39,16 +41,21 @@ _inbox_id: int | None = None
 
 
 # ---------- helpers --------------------------------------------------
-def templates(refresh: bool = False) -> list[dict]:
+def templates(lf: LaserficheClient | None = None, refresh: bool = False) -> list[dict]:
+    """Template catalog (shared cache; any authenticated client may refresh it)."""
     global _templates, _templates_at
     with _lock:
         if refresh or not _templates or time.time() - _templates_at > 3600:
+            if lf is None:
+                if not _templates:
+                    raise LaserficheError("Template catalog not loaded yet")
+                return _templates
             _templates = lf.templates()
             _templates_at = time.time()
         return _templates
 
 
-def inbox_entry_id() -> int:
+def inbox_entry_id(lf: LaserficheClient) -> int:
     global _inbox_id
     if _inbox_id is None:
         _inbox_id = lf.entry_id_by_path(os.environ["LF_INBOX_PATH"])
@@ -87,10 +94,39 @@ def root():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
-@app.get("/api/templates")
-def api_templates(refresh: bool = False):
+@app.get("/api/me")
+def api_me(request: Request):
+    email = users.current_email(request)
+    creds = users.get_creds(email)
+    return {"email": email, "lf_username": creds["username"] if creds else None, "has_lf_creds": bool(creds),
+            "mailbox_enabled": bool(os.environ.get("MAIL_MAILBOX")) and _svc is not None}
+
+
+class LfCredsRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/settings/lf")
+def api_set_lf(req: LfCredsRequest, request: Request):
+    email = users.current_email(request)
     try:
-        return templates(refresh)
+        users.set_creds(email, req.username.strip(), req.password)
+    except LaserficheError as e:
+        raise HTTPException(400, f"Laserfiche rejected those credentials: {e}")
+    return {"ok": True}
+
+
+@app.delete("/api/settings/lf")
+def api_clear_lf(request: Request):
+    users.clear_creds(users.current_email(request))
+    return {"ok": True}
+
+
+@app.get("/api/templates")
+def api_templates(refresh: bool = False, lf: LaserficheClient = Depends(users.lf_for)):
+    try:
+        return templates(lf, refresh)
     except LaserficheError as e:
         raise HTTPException(502, str(e))
 
@@ -111,7 +147,7 @@ def api_queue():
 
 
 @app.post("/api/extract")
-async def api_extract(file: UploadFile | None = File(None), inbox_name: str | None = Form(None), template: str | None = Form(None)):
+async def api_extract(file: UploadFile | None = File(None), inbox_name: str | None = Form(None), template: str | None = Form(None), lf: LaserficheClient = Depends(users.lf_for)):
     if file is not None:
         data = await file.read()
         name = file.filename or "upload.pdf"
@@ -137,7 +173,7 @@ async def api_extract(file: UploadFile | None = File(None), inbox_name: str | No
         raise HTTPException(502, f"Extraction failed: {e}")
     if template:
         return result
-    return _maybe_auto_save(job_id, result, name)
+    return _maybe_auto_save(job_id, result, name, lf)
 
 
 @app.post("/api/reextract/{job_id}")
@@ -164,7 +200,7 @@ class SaveRequest(BaseModel):
     filename: str
 
 
-def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: str) -> dict:
+def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: str, lf: LaserficheClient) -> dict:
     d = _job_dir(job_id)
     tdef = next((t for t in templates() if t["name"] == template), None)
     if not tdef:
@@ -177,7 +213,7 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
         entry_id = int(meta["lf_entry_id"])
         lf.update_document(entry_id, template, fields, meta.get("lf_template"))
     else:
-        entry_id = lf.import_pdf(inbox_entry_id(), filename, (d / "doc.pdf").read_bytes(), template, fields)
+        entry_id = lf.import_pdf(inbox_entry_id(lf), filename, (d / "doc.pdf").read_bytes(), template, fields)
     src = meta.get("source", "")
     claimed = WORK / f"{src}.claimed"
     if claimed.exists():
@@ -187,9 +223,9 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
 
 
 @app.post("/api/save/{job_id}")
-def api_save(job_id: str, req: SaveRequest):
+def api_save(job_id: str, req: SaveRequest, lf: LaserficheClient = Depends(users.lf_for)):
     try:
-        return _save(job_id, req.template, req.fields, req.filename)
+        return _save(job_id, req.template, req.fields, req.filename, lf)
     except LaserficheError as e:
         raise HTTPException(502, str(e))
 
@@ -205,10 +241,10 @@ def api_discard(job_id: str):
     return {"discarded": True}
 
 
-def _maybe_auto_save(job_id: str, result: dict, name: str) -> dict:
-    if AUTO_SAVE and result["confidence"] >= AUTO_SAVE:
+def _maybe_auto_save(job_id: str, result: dict, name: str, lf: LaserficheClient) -> dict:
+    if AUTO_SAVE and result["confidence"] >= AUTO_SAVE and lf is not None:
         try:
-            saved = _save(job_id, result["template"], result["fields"], result["suggested_filename"] or name)
+            saved = _save(job_id, result["template"], result["fields"], result["suggested_filename"] or name, lf)
             return {**result, "auto_saved": True, **saved}
         except Exception as e:
             result["notes"] = f"Auto-save failed: {e}. " + result.get("notes", "")
@@ -221,7 +257,7 @@ def _from_mailbox(name: str, pdf: bytes, context: str) -> None:
     job_id = _new_job(pdf, name, context)
     try:
         result = _run_extract(job_id, None)
-        _maybe_auto_save(job_id, result, name)
+        _maybe_auto_save(job_id, result, name, _svc)
     except Exception as e:  # leave the job in the queue for a human; note the error
         m = WORK / job_id / "meta.json"
         m.write_text(json.dumps({**json.loads(m.read_text()), "template": None, "fields": {}, "confidence": 0,
@@ -229,7 +265,7 @@ def _from_mailbox(name: str, pdf: bytes, context: str) -> None:
 
 
 # ---------- backfill: documents already in Laserfiche ----------
-_bf_queue: "queue.Queue[int]" = queue.Queue()
+_bf_queue: "queue.Queue[tuple[int, str]]" = queue.Queue()
 _bf_state = {"queued": 0, "done": 0, "failed": 0, "errors": []}
 _bf_seen: set[int] = set()
 
@@ -242,7 +278,7 @@ class ScanRequest(BaseModel):
 
 
 @app.post("/api/backfill/scan")
-def api_backfill_scan(req: ScanRequest):
+def api_backfill_scan(req: ScanRequest, lf: LaserficheClient = Depends(users.lf_for)):
     try:
         docs = lf.list_documents(req.folder, req.recursive, req.only_no_template, req.limit)
     except LaserficheError as e:
@@ -253,7 +289,7 @@ def api_backfill_scan(req: ScanRequest):
 
 
 @app.get("/api/lf/folders")
-def api_lf_folders(path: str = "\\"):
+def api_lf_folders(path: str = "\\", lf: LaserficheClient = Depends(users.lf_for)):
     try:
         return lf.list_folders(path)
     except LaserficheError as e:
@@ -265,13 +301,15 @@ class QueueRequest(BaseModel):
 
 
 @app.post("/api/backfill/queue")
-def api_backfill_queue(req: QueueRequest):
+def api_backfill_queue(req: QueueRequest, request: Request):
+    email = users.current_email(request)
+    users.client_for_email(email)  # fail fast if no credentials
     n = 0
     for eid in req.entry_ids:
         if eid in _bf_seen:
             continue
         _bf_seen.add(eid)
-        _bf_queue.put(eid)
+        _bf_queue.put((eid, email))
         n += 1
     _bf_state["queued"] += n
     return {"queued": n}
@@ -282,7 +320,8 @@ def api_backfill_status():
     return {**_bf_state, "pending": _bf_queue.qsize(), "errors": _bf_state["errors"][-10:]}
 
 
-def _backfill_one(entry_id: int) -> None:
+def _backfill_one(entry_id: int, email: str) -> None:
+    lf = users.client_for_email(email)
     entry = lf.get_entry(entry_id)
     pdf = lf.export_pdf(entry_id, entry)
     existing = lf.entry_fields(entry_id)
@@ -293,7 +332,7 @@ def _backfill_one(entry_id: int) -> None:
     job_id = _new_job(pdf, f"LF {entry_id}: {entry.get('name')}", ctx)
     m = WORK / job_id / "meta.json"
     m.write_text(json.dumps({**json.loads(m.read_text()), "lf_entry_id": entry_id, "lf_path": entry.get("fullPath"),
-                             "lf_template": entry.get("templateName"), "lf_fields": existing}))
+                             "lf_template": entry.get("templateName"), "lf_fields": existing, "owner": email}))
     try:
         _run_extract(job_id, entry.get("templateName") or None)
     except Exception as e:
@@ -303,9 +342,9 @@ def _backfill_one(entry_id: int) -> None:
 
 def _backfill_worker():
     while True:
-        eid = _bf_queue.get()
+        eid, email = _bf_queue.get()
         try:
-            _backfill_one(eid)
+            _backfill_one(eid, email)
             _bf_state["done"] += 1
         except Exception as e:
             _bf_state["failed"] += 1
@@ -317,7 +356,10 @@ def _backfill_worker():
 
 @app.on_event("startup")
 def _start_mail():
-    mailbox.start_if_configured(_from_mailbox)
+    if _svc is not None:
+        mailbox.start_if_configured(_from_mailbox)
+    elif os.environ.get("MAIL_MAILBOX"):
+        logging.getLogger("lf-capture").warning("MAIL_MAILBOX is set but LF_USERNAME/LF_PASSWORD (service account) is not; mailbox capture disabled")
     for i in range(int(os.environ.get("BACKFILL_WORKERS", "2"))):
         threading.Thread(target=_backfill_worker, daemon=True, name=f"backfill-{i}").start()
 

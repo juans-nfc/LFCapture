@@ -21,11 +21,11 @@ class LaserficheError(RuntimeError):
 
 
 class LaserficheClient:
-    def __init__(self) -> None:
+    def __init__(self, username: str | None = None, password: str | None = None) -> None:
         self.base = os.environ["LF_BASE_URL"].rstrip("/")  # e.g. https://lf.northernfruit.com/LFRepositoryAPI
         self.repo = os.environ["LF_REPOSITORY_ID"]
-        self.user = os.environ["LF_USERNAME"]
-        self.password = os.environ["LF_PASSWORD"]
+        self.user = username if username is not None else os.environ.get("LF_USERNAME", "")
+        self.password = password if password is not None else os.environ.get("LF_PASSWORD", "")
         self.generate_pages = os.environ.get("LF_GENERATE_PAGES", "1") != "0"
         self._token: str | None = None
         self._expires_at = 0.0

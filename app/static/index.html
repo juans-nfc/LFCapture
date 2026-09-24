@@ -68,6 +68,17 @@
 
   .busy { position: absolute; inset: 0; background: rgba(242,244,241,.85); display: grid; place-content: center; color: var(--muted); font-size: 18px; }
 
+  /* settings dialog */
+  #settings { position: fixed; inset: 0; background: rgba(28,42,34,.35); display: grid; place-content: center; z-index: 20; }
+  #settings .box { background: var(--pane); border-radius: 8px; padding: 22px 26px; width: min(440px, 92vw); box-shadow: 0 12px 32px rgba(0,0,0,.2); }
+  #settings h2 { margin: 0 0 4px; font-size: 19px; font-weight: 600; }
+  #settings p { margin: 0 0 14px; color: var(--muted); font-size: 15px; }
+  #settings label { display: block; color: var(--muted); font-size: 14px; margin: 10px 0 4px; }
+  #settings input { font: inherit; width: 100%; border: 1px solid var(--rule); border-radius: 4px; padding: 7px 9px; }
+  #settings .actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+  #settings .err { color: var(--red); font-size: 15px; min-height: 20px; margin-top: 8px; }
+  header .who { color: var(--muted); font-size: 14px; }
+
   /* backfill panel */
   #bf { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--pane); display: flex; flex-direction: column; z-index: 5; }
   #bf .head { display: flex; gap: 10px; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
@@ -103,11 +114,28 @@
   <h1>LF Capture</h1>
   <span class="queue" id="queue">Checking inbox…</span>
   <span class="spacer"></span>
+  <span class="who" id="who"></span>
+  <button id="setopen" title="Your Laserfiche login">Settings</button>
   <button id="bfopen" title="Read documents already in Laserfiche">Backfill</button>
   <label class="btn">Upload PDF<input id="upload" type="file" accept="application/pdf" hidden></label>
   <button id="refresh" title="Reload templates from Laserfiche">Reload templates</button>
 </header>
 
+<div id="settings" hidden>
+  <div class="box">
+    <h2>Laserfiche login</h2>
+    <p>Documents are read and saved with <em>your</em> Laserfiche account, so you only see what you have rights to and the audit trail shows your name. Stored encrypted on the tools server.</p>
+    <label>Laserfiche username</label><input id="lfuser" autocomplete="username">
+    <label>Password</label><input id="lfpass" type="password" autocomplete="current-password">
+    <div class="err" id="seterr"></div>
+    <div class="actions">
+      <button class="save" id="setsave">Save &amp; test</button>
+      <button class="btn" id="setcancel">Cancel</button>
+      <span style="flex:1"></span>
+      <button class="btn" id="setforget" hidden>Forget login</button>
+    </div>
+  </div>
+</div>
 <main style="position:relative">
   <section id="bf" hidden>
     <div class="head">
@@ -156,11 +184,37 @@
 const $ = s => document.querySelector(s);
 let templates = [], job = null;
 
+let me = null;
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => ({}))).detail || r.statusText;
+    if (r.status === 401 && detail === 'lf_credentials_required') { openSettings(true); throw new Error('Enter your Laserfiche login to continue'); }
+    throw new Error(detail);
+  }
   return r.json();
 }
+async function loadMe() {
+  try { me = await api('api/me'); $('#who').textContent = me.email + (me.lf_username ? ` · LF: ${me.lf_username}` : ''); } catch { me = null; }
+  return me;
+}
+function openSettings(required = false) {
+  $('#settings').hidden = false; $('#seterr').textContent = required ? 'Your Laserfiche login is needed before the tool can read or save documents.' : '';
+  $('#lfuser').value = (me && me.lf_username) || ''; $('#lfpass').value = '';
+  $('#setforget').hidden = !(me && me.has_lf_creds); $('#setcancel').hidden = required && !(me && me.has_lf_creds);
+  $('#lfuser').focus();
+}
+$('#setopen').onclick = () => openSettings(false);
+$('#setcancel').onclick = () => { $('#settings').hidden = true; };
+$('#setsave').onclick = async () => {
+  $('#seterr').textContent = 'Testing login…';
+  try {
+    await api('api/settings/lf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#lfuser').value, password: $('#lfpass').value }) });
+    $('#settings').hidden = true; await loadMe(); await loadTemplates(); setStatus(`Laserfiche login saved for ${me.email}`, 'ok'); nextFromQueue().catch(() => {});
+  } catch (e) { $('#seterr').textContent = e.message; }
+};
+$('#setforget').onclick = async () => { if (confirm('Remove your stored Laserfiche login?')) { await api('api/settings/lf', { method: 'DELETE' }); await loadMe(); openSettings(true); } };
+$('#lfpass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#setsave').click(); });
 function setStatus(msg, cls = '') { const s = $('#status'); s.textContent = msg; s.className = 'status ' + cls; }
 function busy(on) { $('#busy').hidden = !on; }
 
@@ -342,8 +396,10 @@ async function pollBf() {
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 (async () => {
+  await loadMe();
+  if (me && !me.has_lf_creds) { openSettings(true); $('#queue').textContent = 'Laserfiche login needed'; return; }
   try { await loadTemplates(); }
-  catch (e) { setStatus(e.message, 'err'); $('#queue').textContent = 'Laserfiche unreachable'; return; }
+  catch (e) { if (!e.message.includes('Laserfiche login')) { setStatus(e.message, 'err'); $('#queue').textContent = 'Laserfiche unreachable'; } return; }
   try { await nextFromQueue(); } catch (e) { setStatus(e.message, 'err'); }
   setInterval(() => { if (!job && $('#busy').hidden) nextFromQueue().catch(() => {}); else loadQueue().catch(() => {}); }, 15000);
 })();
