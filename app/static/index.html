@@ -44,15 +44,20 @@
   .row { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--rule); }
   .row label { color: var(--muted); }
   .row label .req { color: var(--red); margin-left: 3px; }
-  .row input, .row select, .row textarea { font: inherit; width: 100%; border: 0; border-bottom: 1px solid transparent; background: transparent; color: var(--ink); padding: 2px 0; outline: none; }
-  .row input:focus, .row select:focus, .row textarea:focus { border-bottom-color: var(--green); }
-  .row input.missing { border-bottom-color: var(--red); }
+  .row input, .row select, .row textarea { font: inherit; width: 100%; border: 1px solid var(--rule); border-radius: 4px; background: #fbfcfa; color: var(--ink); padding: 5px 8px; outline: none; cursor: text; }
+  .row select { cursor: pointer; }
+  .row input:hover, .row select:hover, .row textarea:hover { border-color: #9aa79e; }
+  .row input:focus, .row select:focus, .row textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px rgba(47,107,58,.15); }
+  .row input::placeholder { color: #a5ada7; }
+  .hint { color: var(--muted); font-size: 14px; margin: 10px 0 0; }
+  .row input.missing, .row select.missing { border-color: var(--red); }
   .row select { appearance: auto; }
   .row.template { border-bottom: 2px solid var(--ink); margin-bottom: 8px; }
   .row.template select { font-weight: 600; font-size: 17px; }
-  .multi .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--rule); border-radius: 3px; padding: 1px 6px; margin: 2px 4px 2px 0; }
+  .multi .val { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .multi .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--rule); border-radius: 3px; padding: 3px 8px; background: #eef2ee; }
   .multi .chip button { border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0; font-size: 15px; }
-  .multi input { width: auto; min-width: 120px; }
+  .multi input { width: auto; min-width: 160px; flex: 1; }
 
   .save { font: inherit; font-weight: 600; background: var(--green); color: var(--green-ink); border: 0; border-radius: 4px; padding: 10px 18px; cursor: pointer; flex: 1; }
   .save:disabled { opacity: .5; cursor: default; }
@@ -201,6 +206,7 @@ function render() {
     <div class="row" ${job.lf_path ? 'hidden' : ''}><label>File name</label><input id="fname" value="${esc(job.suggested_filename || job.source.replace(/\.pdf$/i, ''))}"></div>
   `);
   if (t) for (const fd of t.fields) f.appendChild(fieldRow(fd, job.fields[fd.name] || []));
+  if (t) f.insertAdjacentHTML('beforeend', `<p class="hint">Every value above can be edited before saving. Change the template to re-read the document with different fields.</p>`);
   $('#save').disabled = !t;
   $('#save').textContent = job.lf_path ? 'Update metadata in Laserfiche' : 'Save to Laserfiche';
 
@@ -231,7 +237,7 @@ function fieldRow(fd, values) {
     const sel = document.createElement('select'); sel.innerHTML = '<option value=""></option>' + fd.list.map(v => `<option ${values[0] === v ? 'selected' : ''}>${esc(v)}</option>`).join('');
     val.appendChild(sel); row.getValues = () => sel.value ? [sel.value] : [];
   } else {
-    const inp = document.createElement('input'); inp.value = values[0] || '';
+    const inp = document.createElement('input'); inp.value = values[0] || ''; inp.placeholder = fd.required ? 'required' : '';
     if (fd.type === 'Date') inp.type = 'date';
     val.appendChild(inp); row.getValues = () => inp.value ? [inp.value] : [];
   }
