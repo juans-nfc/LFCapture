@@ -125,14 +125,14 @@
   <div class="box">
     <h2>Laserfiche login</h2>
     <p>Documents are read and saved with <em>your</em> Laserfiche account, so you only see what you have rights to and the audit trail shows your name. Stored encrypted on the tools server.</p>
-    <label>Laserfiche username</label><input id="lfuser" autocomplete="username">
+    <label>Laserfiche username</label><input id="lfuser" autocomplete="username" placeholder="northernfruit\juans  or  juans@northernfruit.com">
     <label>Password</label><input id="lfpass" type="password" autocomplete="current-password">
     <div class="err" id="seterr"></div>
     <div class="actions">
       <button class="save" id="setsave">Save &amp; test</button>
       <button class="btn" id="setcancel">Cancel</button>
       <span style="flex:1"></span>
-      <button class="btn" id="setforget" hidden>Forget login</button>
+      <button class="btn" id="setforget" hidden>Sign out</button>
     </div>
   </div>
 </div>
@@ -195,7 +195,7 @@ async function api(path, opts = {}) {
   return r.json();
 }
 async function loadMe() {
-  try { me = await api('api/me'); $('#who').textContent = me.email + (me.lf_username ? ` · LF: ${me.lf_username}` : ''); } catch { me = null; }
+  try { me = await api('api/me'); $('#who').textContent = me.lf_username ? `Signed in to Laserfiche as ${me.lf_username}` : ''; } catch { me = null; }
   return me;
 }
 function openSettings(required = false) {
@@ -210,10 +210,10 @@ $('#setsave').onclick = async () => {
   $('#seterr').textContent = 'Testing login…';
   try {
     await api('api/settings/lf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#lfuser').value, password: $('#lfpass').value }) });
-    $('#settings').hidden = true; await loadMe(); await loadTemplates(); setStatus(`Laserfiche login saved for ${me.email}`, 'ok'); nextFromQueue().catch(() => {});
+    $('#settings').hidden = true; await loadMe(); await loadTemplates(); $('#queue').textContent = ''; setStatus(`Signed in to Laserfiche as ${me.lf_username}`, 'ok'); nextFromQueue().catch(() => {});
   } catch (e) { $('#seterr').textContent = e.message; }
 };
-$('#setforget').onclick = async () => { if (confirm('Remove your stored Laserfiche login?')) { await api('api/settings/lf', { method: 'DELETE' }); await loadMe(); openSettings(true); } };
+$('#setforget').onclick = async () => { if (confirm('Sign out and remove your stored Laserfiche login?')) { await api('api/settings/lf', { method: 'DELETE' }); await loadMe(); job = null; render(); openSettings(true); } };
 $('#lfpass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#setsave').click(); });
 function setStatus(msg, cls = '') { const s = $('#status'); s.textContent = msg; s.className = 'status ' + cls; }
 function busy(on) { $('#busy').hidden = !on; }

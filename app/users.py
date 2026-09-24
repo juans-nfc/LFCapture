@@ -1,8 +1,9 @@
-"""Per-user Laserfiche credentials.
+"""Per-user Laserfiche credentials with the app's own session cookie.
 
-Identity comes from the reverse proxy (oauth2-proxy sets X-Auth-Request-Email). The user's
-Laserfiche password is stored encrypted (Fernet, key = APP_SECRET) so the app can re-login
-when Laserfiche's short-lived token expires. One LaserficheClient is kept per user.
+The Laserfiche login IS the identity: the user enters their LF username/password once, the app
+verifies it against Laserfiche, stores the password encrypted (Fernet, key = APP_SECRET) keyed by
+the LF username, and sets a signed cookie holding that username. Every later request looks the
+client up by that cookie. No dependency on the reverse proxy's identity headers.
 """
 from __future__ import annotations
 
@@ -11,12 +12,16 @@ import hashlib
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
-from cryptography.fernet import Fernet
-from fastapi import HTTPException, Request
+from cryptography.fernet import Fernet, InvalidToken
+from fastapi import HTTPException, Request, Response
 
-from .laserfiche import LaserficheClient, LaserficheError
+from .laserfiche import LaserficheClient
+
+COOKIE = "lfcapture_user"
+COOKIE_DAYS = int(os.environ.get("SESSION_DAYS", "30"))
 
 _lock = threading.Lock()
 _clients: dict[str, LaserficheClient] = {}
@@ -25,7 +30,7 @@ _clients: dict[str, LaserficheClient] = {}
 def _fernet() -> Fernet:
     secret = os.environ.get("APP_SECRET")
     if not secret:
-        raise RuntimeError("APP_SECRET is not set (any long random string; used to encrypt stored Laserfiche passwords)")
+        raise RuntimeError("APP_SECRET is not set (any long random string; encrypts stored Laserfiche passwords and signs sessions)")
     return Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
 
 
@@ -46,54 +51,84 @@ def _dump(d: dict) -> None:
     tmp.replace(p)
 
 
-def current_email(request: Request) -> str:
-    email = (request.headers.get("x-auth-request-email") or os.environ.get("DEV_USER_EMAIL") or "").strip().lower()
-    if not email:
-        raise HTTPException(401, "No signed-in user (expected X-Auth-Request-Email from the proxy)")
-    return email
+def _key(username: str) -> str:
+    return username.strip().lower()
 
 
-def get_creds(email: str) -> dict | None:
-    rec = _load().get(email)
+# ---- session cookie ----
+def current_user(request: Request) -> str | None:
+    """LF username from the session cookie, or None."""
+    tok = request.cookies.get(COOKIE)
+    if not tok:
+        return None
+    try:
+        return _fernet().decrypt(tok.encode(), ttl=COOKIE_DAYS * 86400).decode()
+    except (InvalidToken, ValueError):
+        return None
+
+
+def set_session(response: Response, username: str) -> None:
+    tok = _fernet().encrypt(_key(username).encode()).decode()
+    response.set_cookie(COOKIE, tok, max_age=COOKIE_DAYS * 86400, httponly=True, samesite="lax",
+                        secure=os.environ.get("COOKIE_SECURE", "1") != "0", path="/")
+
+
+def clear_session(response: Response) -> None:
+    response.delete_cookie(COOKIE, path="/")
+
+
+# ---- credential store ----
+def get_creds(username: str) -> dict | None:
+    rec = _load().get(_key(username))
     if not rec:
         return None
     return {"username": rec["username"], "password": _fernet().decrypt(rec["password"].encode()).decode()}
 
 
-def set_creds(email: str, username: str, password: str) -> None:
-    # verify before storing
-    LaserficheClient(username, password)._login()
+def set_creds(username: str, password: str) -> None:
+    LaserficheClient(username, password)._login()  # verify before storing
     with _lock:
         d = _load()
-        d[email] = {"username": username, "password": _fernet().encrypt(password.encode()).decode()}
+        d[_key(username)] = {"username": username.strip(), "password": _fernet().encrypt(password.encode()).decode(), "since": time.time()}
         _dump(d)
-        _clients.pop(email, None)
+        _clients.pop(_key(username), None)
 
 
-def clear_creds(email: str) -> None:
+def clear_creds(username: str) -> None:
     with _lock:
         d = _load()
-        d.pop(email, None)
+        d.pop(_key(username), None)
         _dump(d)
-        _clients.pop(email, None)
+        _clients.pop(_key(username), None)
 
 
-def client_for_email(email: str) -> LaserficheClient:
+def client_for(username: str) -> LaserficheClient:
+    k = _key(username)
     with _lock:
-        c = _clients.get(email)
+        c = _clients.get(k)
         if c:
             return c
-        creds = get_creds(email)
+        creds = get_creds(username)
         if not creds:
             raise HTTPException(401, "lf_credentials_required")
         c = LaserficheClient(creds["username"], creds["password"])
-        _clients[email] = c
+        _clients[k] = c
         return c
 
 
 def lf_for(request: Request) -> LaserficheClient:
     """FastAPI dependency: the Laserfiche client for the signed-in user."""
-    return client_for_email(current_email(request))
+    u = current_user(request)
+    if not u:
+        raise HTTPException(401, "lf_credentials_required")
+    return client_for(u)
+
+
+def require_user(request: Request) -> str:
+    u = current_user(request)
+    if not u:
+        raise HTTPException(401, "lf_credentials_required")
+    return u
 
 
 def service_client() -> LaserficheClient | None:

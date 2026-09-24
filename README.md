@@ -17,10 +17,10 @@ adds it here with no code change.
 Set `AUTO_SAVE_CONFIDENCE=0.9` to skip review for confident results with all required fields filled.
 
 ## Who talks to Laserfiche
-Each person uses their **own** Laserfiche account: identity comes from the M365 sign-in at nginx
-(`X-Auth-Request-Email`), and the first visit asks for a Laserfiche username/password in **Settings**.
-The password is stored encrypted with `APP_SECRET` in the work volume (`users.json`) so the app can
-re-login when Laserfiche's token expires. Reads, backfills and saves all run as that user, so
+Each person uses their **own** Laserfiche account (`northernfruit\juans` or `juans@northernfruit.com`,
+whatever works in the LF client). The first visit asks for it in **Settings**; the app verifies it against
+Laserfiche, stores the password encrypted with `APP_SECRET` in the work volume (`users.json`), and sets
+its own session cookie (30 days). No dependency on proxy identity headers. Reads, backfills and saves all run as that user, so
 Laserfiche's own rights and audit trail apply. `LF_USERNAME`/`LF_PASSWORD` (service account) are only
 needed for the unattended mailbox capture.
 

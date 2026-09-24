@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile  # noqa: E402
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -96,9 +96,9 @@ def root():
 
 @app.get("/api/me")
 def api_me(request: Request):
-    email = users.current_email(request)
-    creds = users.get_creds(email)
-    return {"email": email, "lf_username": creds["username"] if creds else None, "has_lf_creds": bool(creds),
+    u = users.current_user(request)
+    creds = users.get_creds(u) if u else None
+    return {"lf_username": creds["username"] if creds else None, "has_lf_creds": bool(creds),
             "mailbox_enabled": bool(os.environ.get("MAIL_MAILBOX")) and _svc is not None}
 
 
@@ -108,18 +108,21 @@ class LfCredsRequest(BaseModel):
 
 
 @app.post("/api/settings/lf")
-def api_set_lf(req: LfCredsRequest, request: Request):
-    email = users.current_email(request)
+def api_set_lf(req: LfCredsRequest, response: Response):
     try:
-        users.set_creds(email, req.username.strip(), req.password)
+        users.set_creds(req.username.strip(), req.password)
     except LaserficheError as e:
-        raise HTTPException(400, f"Laserfiche rejected those credentials: {e}")
+        raise HTTPException(400, f"Laserfiche rejected that login: {e}")
+    users.set_session(response, req.username)
     return {"ok": True}
 
 
 @app.delete("/api/settings/lf")
-def api_clear_lf(request: Request):
-    users.clear_creds(users.current_email(request))
+def api_clear_lf(request: Request, response: Response):
+    u = users.current_user(request)
+    if u:
+        users.clear_creds(u)
+    users.clear_session(response)
     return {"ok": True}
 
 
@@ -302,8 +305,8 @@ class QueueRequest(BaseModel):
 
 @app.post("/api/backfill/queue")
 def api_backfill_queue(req: QueueRequest, request: Request):
-    email = users.current_email(request)
-    users.client_for_email(email)  # fail fast if no credentials
+    email = users.require_user(request)
+    users.client_for(email)  # fail fast if no credentials
     n = 0
     for eid in req.entry_ids:
         if eid in _bf_seen:
@@ -321,7 +324,7 @@ def api_backfill_status():
 
 
 def _backfill_one(entry_id: int, email: str) -> None:
-    lf = users.client_for_email(email)
+    lf = users.client_for(email)
     entry = lf.get_entry(entry_id)
     pdf = lf.export_pdf(entry_id, entry)
     existing = lf.entry_fields(entry_id)
