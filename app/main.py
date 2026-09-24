@@ -103,6 +103,8 @@ def api_queue():
         m = d / "meta.json"
         if m.exists():
             meta = json.loads(m.read_text())
+            if "template" not in meta and "notes" not in meta:
+                continue  # extraction still running (or crashed mid-way); not reviewable yet
             jobs.append({"id": d.name, "source": meta.get("source"), "template": meta.get("template"), "confidence": meta.get("confidence")})
     return {"inbox": pending, "jobs": jobs}
 
@@ -126,7 +128,11 @@ async def api_extract(file: UploadFile | None = File(None), inbox_name: str | No
     job_id = _new_job(data, name)
     try:
         result = _run_extract(job_id, template or None)
-    except Exception as e:  # surface the reason to the UI
+    except Exception as e:  # surface the reason to the UI and drop the half-made job
+        shutil.rmtree(WORK / job_id, ignore_errors=True)
+        claimed = WORK / f"{name}.claimed"
+        if claimed.exists():
+            shutil.move(claimed, FAILED / name)
         raise HTTPException(502, f"Extraction failed: {e}")
     if template:
         return result
@@ -213,7 +219,8 @@ def _from_mailbox(name: str, pdf: bytes, context: str) -> None:
         _maybe_auto_save(job_id, result, name)
     except Exception as e:  # leave the job in the queue for a human; note the error
         m = WORK / job_id / "meta.json"
-        m.write_text(json.dumps({**json.loads(m.read_text()), "notes": f"Automatic read failed: {e}"}))
+        m.write_text(json.dumps({**json.loads(m.read_text()), "template": None, "fields": {}, "confidence": 0,
+                                 "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}))
 
 
 @app.on_event("startup")
