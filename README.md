@@ -16,6 +16,15 @@ adds it here with no code change.
 
 Set `AUTO_SAVE_CONFIDENCE=0.9` to skip review for confident results with all required fields filled.
 
+## Backfill — documents already in Laserfiche
+Header → **Backfill**. Enter a folder path (`\Sales\Orders\80552-00`), optionally include subfolders,
+choose "documents with no template" or all, **Scan**, tick the ones you want, **Queue for review**.
+Each document is exported (edoc if it is a PDF, otherwise the LF pages rendered to PDF), read by Claude
+with its current path/template/field values as context, and dropped into the normal review queue.
+**Update metadata in Laserfiche** sets the template and fields on the existing entry in place — no
+re-import, entry ID and history unchanged. Nothing is written until you press Update on each one.
+Template descriptions and field descriptions in Laserfiche are passed to Claude; fill them in to steer it.
+
 ## Mailbox capture (AS400 path)
 Point the AS400 (or any sender) at a capture mailbox and set the `MAIL_*` values in `.env`.
 The tool polls it through Microsoft Graph, pulls every PDF attachment into the queue with the

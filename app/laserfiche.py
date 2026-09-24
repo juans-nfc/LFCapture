@@ -87,6 +87,7 @@ class LaserficheClient:
                             "multi": bool(f.get("isMultiValue")),
                             "list": list(f.get("listValues") or []),
                             "length": f.get("length"),
+                            "description": f.get("description") or "",
                         }
                         for f in fields
                     ],
@@ -132,3 +133,73 @@ class LaserficheClient:
         if r.status_code >= 400:
             raise LaserficheError(f"Import failed ({r.status_code}): {r.text[:500]}")
         return int(r.json().get("id") or 0)
+
+    # ---- existing documents (backfill) --------------------------------
+    _DOC_SELECT = "id,name,fullPath,folderPath,entryType,templateName,templateId,extension,mimeType,pageCount,isElectronicDocument"
+
+    def list_documents(self, folder_path: str, recursive: bool = False, only_no_template: bool = True, limit: int = 500) -> list[dict]:
+        """Documents under a folder (optionally recursive). Uses Folder/Children with OData paging."""
+        root_id = self.entry_id_by_path(folder_path)
+        out: list[dict] = []
+        pending = [root_id]
+        while pending and len(out) < limit:
+            fid = pending.pop(0)
+            url = f"{self._repo_url}/Entries/{fid}/Folder/Children"
+            params: dict | None = {"$select": self._DOC_SELECT, "$top": "200"}
+            while url and len(out) < limit:
+                r = self._http.get(url, headers=self._headers(), params=params)
+                if r.status_code == 401:
+                    self._token = None
+                    r = self._http.get(url, headers=self._headers(), params=params)
+                if r.status_code >= 400:
+                    raise LaserficheError(f"Children {fid} -> {r.status_code}: {r.text[:300]}")
+                data = r.json()
+                for e in data.get("value", []):
+                    if e.get("entryType") == "Folder":
+                        if recursive:
+                            pending.append(e["id"])
+                    elif e.get("entryType") == "Document":
+                        if only_no_template and (e.get("templateName") or e.get("templateId")):
+                            continue
+                        out.append(e)
+                url, params = data.get("@odata.nextLink"), None
+        return out
+
+    def get_entry(self, entry_id: int) -> dict:
+        return self._req("GET", f"/Entries/{entry_id}", params={"$select": self._DOC_SELECT})
+
+    def entry_fields(self, entry_id: int) -> dict[str, list[str]]:
+        vals = self._req("GET", f"/Entries/{entry_id}/Fields").get("value", [])
+        return {f["name"]: [v for v in (f.get("values") or []) if v not in (None, "")] for f in vals}
+
+    def export_pdf(self, entry_id: int, entry: dict | None = None) -> bytes:
+        """PDF bytes for an existing document: the edoc if it is a PDF, otherwise the LF pages rendered to PDF."""
+        entry = entry or self.get_entry(entry_id)
+        is_pdf_edoc = entry.get("isElectronicDocument") and (
+            (entry.get("mimeType") or "").lower() == "application/pdf" or (entry.get("extension") or "").lower() == "pdf")
+        body = {"part": "Edoc"} if is_pdf_edoc else {"part": "Image", "imageOptions": {"format": "PDF", "includeAnnotations": False}}
+        link = self._req("POST", f"/Entries/{entry_id}/Export", json=body).get("value")
+        if not link:
+            raise LaserficheError(f"Export {entry_id} returned no download link")
+        r = self._http.get(link, headers=self._headers(), follow_redirects=True)
+        if r.status_code >= 400:
+            raise LaserficheError(f"Download {entry_id} -> {r.status_code}: {r.text[:200]}")
+        data = r.content
+        if not data.startswith(b"%PDF"):
+            raise LaserficheError(f"Export {entry_id} did not return a PDF (got {r.headers.get('content-type')})")
+        return data
+
+    def set_template(self, entry_id: int, template: str) -> None:
+        # v2: PUT /Entries/{id}/Template  {"templateName": ...}
+        self._req("PUT", f"/Entries/{entry_id}/Template", json={"templateName": template})
+
+    def set_fields(self, entry_id: int, fields: dict[str, list[str]]) -> None:
+        # PUT replaces the full field set; caller passes every value that should remain.
+        body = {"fields": [{"name": n, "values": [v for v in vals if v not in (None, "")]} for n, vals in fields.items()]}
+        body["fields"] = [f for f in body["fields"] if f["values"]]
+        self._req("PUT", f"/Entries/{entry_id}/Fields", json=body)
+
+    def update_document(self, entry_id: int, template: str, fields: dict[str, list[str]], current_template: str | None) -> None:
+        if template != (current_template or ""):
+            self.set_template(entry_id, template)
+        self.set_fields(entry_id, fields)

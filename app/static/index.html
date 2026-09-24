@@ -62,6 +62,18 @@
 
   .busy { position: absolute; inset: 0; background: rgba(242,244,241,.85); display: grid; place-content: center; color: var(--muted); font-size: 18px; }
 
+  /* backfill panel */
+  #bf { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--pane); display: flex; flex-direction: column; z-index: 5; }
+  #bf .head { display: flex; gap: 10px; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+  #bf .head input[type=text] { font: inherit; flex: 1; min-width: 260px; border: 1px solid var(--rule); border-radius: 4px; padding: 6px 10px; }
+  #bf .head label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  #bf .list { flex: 1; overflow: auto; padding: 0 18px; }
+  #bf table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  #bf th { text-align: left; color: var(--muted); font-weight: 400; padding: 8px 6px; border-bottom: 1px solid var(--rule); position: sticky; top: 0; background: var(--pane); }
+  #bf td { padding: 6px; border-bottom: 1px solid var(--rule); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
+  #bf .foot { border-top: 1px solid var(--rule); padding: 12px 18px; display: flex; gap: 10px; align-items: center; color: var(--muted); }
+  .lfpath { color: var(--muted); font-size: 15px; margin: -10px 0 14px; }
+
   @media (max-width: 800px) {
     main { grid-template-columns: 1fr; grid-template-rows: 45vh 1fr; }
     #viewer { border-right: 0; border-bottom: 1px solid var(--rule); }
@@ -75,11 +87,29 @@
   <h1>LF Capture</h1>
   <span class="queue" id="queue">Checking inbox…</span>
   <span class="spacer"></span>
+  <button id="bfopen" title="Read documents already in Laserfiche">Backfill</button>
   <label class="btn">Upload PDF<input id="upload" type="file" accept="application/pdf" hidden></label>
   <button id="refresh" title="Reload templates from Laserfiche">Reload templates</button>
 </header>
 
-<main>
+<main style="position:relative">
+  <section id="bf" hidden>
+    <div class="head">
+      <strong>Backfill from Laserfiche</strong>
+      <input id="bffolder" type="text" placeholder="\Sales\Orders\80552-00  (folder path in Laserfiche)">
+      <label><input id="bfrec" type="checkbox"> include subfolders</label>
+      <label><select id="bffilter"><option value="1">documents with no template</option><option value="0">all documents</option></select></label>
+      <button class="btn" id="bfscan">Scan</button>
+      <button class="btn" id="bfclose">Close</button>
+    </div>
+    <div class="list"><table id="bftable"></table></div>
+    <div class="foot">
+      <span id="bfinfo">Enter a folder and scan.</span>
+      <span class="spacer" style="flex:1"></span>
+      <span id="bfstatus"></span>
+      <button class="save" id="bfqueue" style="flex:0 0 auto" disabled>Queue for review</button>
+    </div>
+  </section>
   <section id="viewer">
     <div class="empty" id="empty">
       <strong>Nothing to review</strong>
@@ -163,13 +193,15 @@ function render() {
   f.insertAdjacentHTML('beforeend', `
     <p class="summary">${esc(job.summary || 'Document read.')}</p>
     <p class="verdict ${sure ? '' : 'unsure'}">${sure ? 'Confident about the template and key fields.' : (t ? 'Not sure about this one — check the template and fields before saving.' : 'No template chosen yet — pick one and the fields will be read.')}</p>
+    ${job.lf_path ? `<p class="lfpath">Already in Laserfiche: ${esc(job.lf_path)}${job.lf_template ? ` · current template ${esc(job.lf_template)}` : ' · no template'}</p>` : ''}
     ${job.notes ? `<p class="notes">${esc(job.notes)}</p>` : ''}
     <div class="row template"><label>Template</label>
       <select id="tpl"><option value="" ${t ? '' : 'selected'} disabled>— choose a template —</option>${templates.map(x => `<option ${t && x.name === t.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
-    <div class="row"><label>File name</label><input id="fname" value="${esc(job.suggested_filename || job.source.replace(/\.pdf$/i, ''))}"></div>
+    <div class="row" ${job.lf_path ? 'hidden' : ''}><label>File name</label><input id="fname" value="${esc(job.suggested_filename || job.source.replace(/\.pdf$/i, ''))}"></div>
   `);
   if (t) for (const fd of t.fields) f.appendChild(fieldRow(fd, job.fields[fd.name] || []));
   $('#save').disabled = !t;
+  $('#save').textContent = job.lf_path ? 'Update metadata in Laserfiche' : 'Save to Laserfiche';
 
   $('#tpl').onchange = async () => {
     busy(true); setStatus('Re-reading with the new template…');
@@ -220,7 +252,7 @@ async function save() {
   try {
     const res = await api(`api/save/${job.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ template: t.name, fields, filename: $('#fname').value || job.source }) });
-    setStatus(`Saved as ${t.name} (entry ${res.entry_id})`, 'ok');
+    setStatus(job.lf_path ? `Updated entry ${res.entry_id} (${t.name})` : `Saved as ${t.name} (entry ${res.entry_id})`, 'ok');
     await nextFromQueue();
   } catch (e) { setStatus(e.message, 'err'); $('#save').disabled = false; }
 }
@@ -230,6 +262,41 @@ $('#discard').onclick = async () => { if (confirm('Discard this document? It mov
 $('#refresh').onclick = async () => { await loadTemplates(true); setStatus(`${templates.length} templates loaded`, 'ok'); render(); };
 for (const id of ['#upload', '#upload2']) $(id).onchange = e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('file', f); extract(fd); e.target.value = ''; };
 document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && job) save(); });
+// ---- backfill panel ----
+let bfDocs = [];
+$('#bfopen').onclick = () => { $('#bf').hidden = false; $('#bffolder').focus(); pollBf(); };
+$('#bfclose').onclick = () => { $('#bf').hidden = true; };
+$('#bfscan').onclick = async () => {
+  const folder = $('#bffolder').value.trim(); if (!folder) return;
+  $('#bfinfo').textContent = 'Scanning…'; $('#bfqueue').disabled = true; $('#bftable').innerHTML = '';
+  try {
+    const r = await api('api/backfill/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder, recursive: $('#bfrec').checked, only_no_template: $('#bffilter').value === '1' }) });
+    bfDocs = r.documents;
+    $('#bfinfo').textContent = bfDocs.length ? `${bfDocs.length} document${bfDocs.length === 1 ? '' : 's'} found` : 'No matching documents in that folder.';
+    $('#bftable').innerHTML = `<tr><th><input type="checkbox" id="bfall" checked></th><th>Name</th><th>Folder</th><th>Template</th><th>Pages</th></tr>` +
+      bfDocs.map((d, i) => `<tr><td><input type="checkbox" class="bfck" data-i="${i}" ${d.queued ? 'disabled' : 'checked'}></td><td title="${esc(d.name)}">${esc(d.name)}${d.queued ? ' <span style="color:var(--muted)">(queued)</span>' : ''}</td><td title="${esc(d.path)}">${esc((d.path || '').replace(/\\[^\\]*$/, ''))}</td><td>${esc(d.template || '—')}</td><td>${d.pages ?? ''}</td></tr>`).join('');
+    $('#bfall').onchange = e => document.querySelectorAll('.bfck:not(:disabled)').forEach(c => c.checked = e.target.checked);
+    $('#bfqueue').disabled = !bfDocs.some(d => !d.queued);
+  } catch (e) { $('#bfinfo').textContent = e.message; }
+};
+$('#bfqueue').onclick = async () => {
+  const ids = [...document.querySelectorAll('.bfck:checked')].map(c => bfDocs[+c.dataset.i].id);
+  if (!ids.length) return;
+  if (!confirm(`Read ${ids.length} document${ids.length === 1 ? '' : 's'} and add them to the review queue? Nothing is written to Laserfiche until you press Update on each one.`)) return;
+  const r = await api('api/backfill/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_ids: ids }) });
+  $('#bfinfo').textContent = `${r.queued} queued — they appear in the review queue as they finish reading.`;
+  $('#bfscan').click();
+};
+async function pollBf() {
+  if ($('#bf').hidden) return;
+  try { const st = await api('api/backfill/status');
+    $('#bfstatus').textContent = st.pending || st.done || st.failed ? `reading: ${st.pending} pending · ${st.done} done · ${st.failed} failed` : '';
+    if (st.errors.length) $('#bfstatus').title = st.errors.join('\n');
+  } catch {}
+  setTimeout(pollBf, 3000);
+}
+
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 (async () => {

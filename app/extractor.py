@@ -28,8 +28,10 @@ _TYPE_HINT = {
 def _field_schema(f: dict) -> dict:
     hint = _TYPE_HINT.get(f["type"], "text")
     desc = f"{f['name']} ({hint})"
+    if f.get("description"):
+        desc += f": {f['description']}"
     if f["list"]:
-        desc += ". Allowed: " + ", ".join(f["list"])
+        desc += ". Allowed: " + ", ".join(f["list"]) + ". Leave OUT unless one of these values is actually printed on the document."
     if f["required"]:
         desc += ". Required."
     item = {"type": "string"}
