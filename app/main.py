@@ -55,11 +55,14 @@ def templates(lf: LaserficheClient | None = None, refresh: bool = False) -> list
         return _templates
 
 
-def inbox_entry_id(lf: LaserficheClient) -> int:
-    global _inbox_id
-    if _inbox_id is None:
-        _inbox_id = lf.entry_id_by_path(os.environ["LF_INBOX_PATH"])
-    return _inbox_id
+_folder_ids: dict[str, int] = {}
+
+
+def folder_entry_id(lf: LaserficheClient, path: str | None = None) -> int:
+    path = (path or os.environ["LF_INBOX_PATH"]).strip().rstrip("\\") or "\\"
+    if path not in _folder_ids:
+        _folder_ids[path] = lf.entry_id_by_path(path)
+    return _folder_ids[path]
 
 
 def _job_dir(job_id: str) -> Path:
@@ -78,10 +81,10 @@ def _new_job(pdf_bytes: bytes, source_name: str, context: str = "") -> str:
     return job_id
 
 
-def _run_extract(job_id: str, forced: str | None) -> dict:
+def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = None) -> dict:
     d = _job_dir(job_id)
     meta = json.loads((d / "meta.json").read_text())
-    result = extractor.extract((d / "doc.pdf").read_bytes(), templates(), forced, meta.get("context", ""))
+    result = extractor.extract((d / "doc.pdf").read_bytes(), templates(lf), forced, meta.get("context", ""))
     meta.update(result)
     (d / "meta.json").write_text(json.dumps(meta))
     return {"id": job_id, **meta}
@@ -99,6 +102,7 @@ def api_me(request: Request):
     u = users.current_user(request)
     creds = users.get_creds(u) if u else None
     return {"lf_username": creds["username"] if creds else None, "has_lf_creds": bool(creds),
+            "inbox_path": os.environ.get("LF_INBOX_PATH", ""),
             "mailbox_enabled": bool(os.environ.get("MAIL_MAILBOX")) and _svc is not None}
 
 
@@ -167,7 +171,7 @@ async def api_extract(file: UploadFile | None = File(None), inbox_name: str | No
         raise HTTPException(400, "Not a PDF")
     job_id = _new_job(data, name)
     try:
-        result = _run_extract(job_id, template or None)
+        result = _run_extract(job_id, template or None, lf)
     except Exception as e:  # surface the reason to the UI and drop the half-made job
         shutil.rmtree(WORK / job_id, ignore_errors=True)
         claimed = WORK / f"{name}.claimed"
@@ -180,9 +184,9 @@ async def api_extract(file: UploadFile | None = File(None), inbox_name: str | No
 
 
 @app.post("/api/reextract/{job_id}")
-def api_reextract(job_id: str, template: str = Form(...)):
+def api_reextract(job_id: str, template: str = Form(...), lf: LaserficheClient = Depends(users.lf_for)):
     try:
-        return _run_extract(job_id, template)
+        return _run_extract(job_id, template, lf)
     except Exception as e:
         raise HTTPException(502, f"Extraction failed: {e}")
 
@@ -201,11 +205,12 @@ class SaveRequest(BaseModel):
     template: str
     fields: dict[str, list[str]]
     filename: str
+    folder: str | None = None   # Laserfiche folder path; defaults to LF_INBOX_PATH
 
 
-def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: str, lf: LaserficheClient) -> dict:
+def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: str, lf: LaserficheClient, folder: str | None = None) -> dict:
     d = _job_dir(job_id)
-    tdef = next((t for t in templates() if t["name"] == template), None)
+    tdef = next((t for t in templates(lf) if t["name"] == template), None)
     if not tdef:
         raise HTTPException(400, f"Unknown template {template}")
     missing = [f["name"] for f in tdef["fields"] if f["required"] and not [v for v in fields.get(f["name"], []) if v]]
@@ -216,7 +221,11 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
         entry_id = int(meta["lf_entry_id"])
         lf.update_document(entry_id, template, fields, meta.get("lf_template"))
     else:
-        entry_id = lf.import_pdf(inbox_entry_id(lf), filename, (d / "doc.pdf").read_bytes(), template, fields)
+        try:
+            parent = folder_entry_id(lf, folder)
+        except LaserficheError as e:
+            raise HTTPException(400, f"Destination folder not found: {folder or os.environ.get('LF_INBOX_PATH')} ({e})")
+        entry_id = lf.import_pdf(parent, filename, (d / "doc.pdf").read_bytes(), template, fields)
     src = meta.get("source", "")
     claimed = WORK / f"{src}.claimed"
     if claimed.exists():
@@ -228,7 +237,7 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
 @app.post("/api/save/{job_id}")
 def api_save(job_id: str, req: SaveRequest, lf: LaserficheClient = Depends(users.lf_for)):
     try:
-        return _save(job_id, req.template, req.fields, req.filename, lf)
+        return _save(job_id, req.template, req.fields, req.filename, lf, req.folder)
     except LaserficheError as e:
         raise HTTPException(502, str(e))
 
@@ -259,7 +268,7 @@ def _from_mailbox(name: str, pdf: bytes, context: str) -> None:
     """Mail poller callback: extract now so the queue shows a finished job, auto-save if allowed."""
     job_id = _new_job(pdf, name, context)
     try:
-        result = _run_extract(job_id, None)
+        result = _run_extract(job_id, None, _svc)
         _maybe_auto_save(job_id, result, name, _svc)
     except Exception as e:  # leave the job in the queue for a human; note the error
         m = WORK / job_id / "meta.json"
@@ -337,7 +346,7 @@ def _backfill_one(entry_id: int, email: str) -> None:
     m.write_text(json.dumps({**json.loads(m.read_text()), "lf_entry_id": entry_id, "lf_path": entry.get("fullPath"),
                              "lf_template": entry.get("templateName"), "lf_fields": existing, "owner": email}))
     try:
-        _run_extract(job_id, entry.get("templateName") or None)
+        _run_extract(job_id, entry.get("templateName") or None, lf)
     except Exception as e:
         m.write_text(json.dumps({**json.loads(m.read_text()), "template": entry.get("templateName"), "fields": existing,
                                  "confidence": 0, "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}))

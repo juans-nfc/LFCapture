@@ -54,6 +54,8 @@
   .row select { appearance: auto; }
   .row.template { border-bottom: 2px solid var(--ink); margin-bottom: 8px; }
   .row.template select { font-weight: 600; font-size: 17px; }
+  .row .withbtn { display: flex; gap: 8px; }
+  .row .withbtn input { flex: 1; }
   .multi .val { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
   .multi .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--rule); border-radius: 3px; padding: 3px 8px; background: #eef2ee; }
   .multi .chip button { border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0; font-size: 15px; }
@@ -140,6 +142,13 @@
   </div>
 </div>
 <main style="position:relative">
+    <div id="browse" hidden>
+      <div class="crumb"><button class="btn" id="brup" title="Up one level">↑</button><code id="brpath">\</code></div>
+      <div class="find"><input id="brfind" placeholder="Type to find a folder here, e.g. 80552 — Enter opens the first match"></div>
+      <ul id="brlist"></ul>
+      <div class="actions"><span id="brinfo"></span><span style="flex:1"></span><button class="btn" id="brcancel">Cancel</button><button class="save" id="bruse" style="flex:0 0 auto">Use this folder</button></div>
+    </div>
+
   <section id="bf" hidden>
     <div class="head">
       <strong>Backfill from Laserfiche</strong>
@@ -149,12 +158,6 @@
       <label><select id="bffilter"><option value="1">documents with no template</option><option value="0">all documents</option></select></label>
       <button class="btn" id="bfscan">Scan</button>
       <button class="btn" id="bfclose">Close</button>
-    </div>
-    <div id="browse" hidden>
-      <div class="crumb"><button class="btn" id="brup" title="Up one level">↑</button><code id="brpath">\</code></div>
-      <div class="find"><input id="brfind" placeholder="Type to find a folder here, e.g. 80552 — Enter opens the first match"></div>
-      <ul id="brlist"></ul>
-      <div class="actions"><span id="brinfo"></span><span style="flex:1"></span><button class="btn" id="brcancel">Cancel</button><button class="save" id="bruse" style="flex:0 0 auto">Use this folder</button></div>
     </div>
     <div class="list"><table id="bftable"></table></div>
     <div class="foot">
@@ -278,12 +281,14 @@ function render() {
     <div class="row template"><label>Template</label>
       <select id="tpl"><option value="" ${t ? '' : 'selected'} disabled>— choose a template —</option>${templates.map(x => `<option ${t && x.name === t.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
     <div class="row" ${job.lf_path ? 'hidden' : ''}><label>File name</label><input id="fname" value="${esc(job.suggested_filename || job.source.replace(/\.pdf$/i, ''))}"></div>
+    <div class="row" ${job.lf_path ? 'hidden' : ''}><label>Save to</label><div class="withbtn"><input id="folder" value="${esc(lastFolder())}" placeholder="${esc((me && me.inbox_path) || '')}"><button class="btn" id="folderbrowse" type="button">Browse…</button></div></div>
   `);
   if (t) for (const fd of t.fields) f.appendChild(fieldRow(fd, job.fields[fd.name] || []));
   if (t) f.insertAdjacentHTML('beforeend', `<p class="hint">Every value above can be edited before saving. Change the template to re-read the document with different fields.</p>`);
   $('#save').disabled = !t;
   $('#save').textContent = job.lf_path ? 'Update metadata in Laserfiche' : 'Save to Laserfiche';
 
+  if ($('#folderbrowse')) $('#folderbrowse').onclick = () => openBrowser($('#folder').value, p => { $('#folder').value = p; try { localStorage.setItem('lfc_folder', p); } catch {} });
   $('#tpl').onchange = async () => {
     busy(true); setStatus('Re-reading with the new template…');
     try {
@@ -332,7 +337,8 @@ async function save() {
   $('#save').disabled = true; setStatus('Saving…');
   try {
     const res = await api(`api/save/${job.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ template: t.name, fields, filename: $('#fname').value || job.source }) });
+      body: JSON.stringify({ template: t.name, fields, filename: $('#fname').value || job.source, folder: ($('#folder') && $('#folder').value.trim()) || null }) });
+    try { if ($('#folder') && $('#folder').value.trim()) localStorage.setItem('lfc_folder', $('#folder').value.trim()); } catch {}
     setStatus(job.lf_path ? `Updated entry ${res.entry_id} (${t.name})` : `Saved as ${t.name} (entry ${res.entry_id})`, 'ok');
     await nextFromQueue();
   } catch (e) { setStatus(e.message, 'err'); $('#save').disabled = false; }
@@ -368,10 +374,13 @@ $('#brfind').onkeydown = e => {
   if (e.key === 'Enter') { const first = document.querySelector('#brlist li[data-path]'); if (first) brLoad(first.dataset.path); e.preventDefault(); }
   if (e.key === 'Escape') { $('#brfind').value = ''; brRender(); }
 };
-$('#bfbrowse').onclick = () => { $('#browse').hidden = false; brLoad($('#bffolder').value.trim() || '\\'); };
+let brOnPick = null;
+function openBrowser(startPath, onPick) { brOnPick = onPick; $('#browse').hidden = false; brLoad((startPath || '').trim() || (me && me.inbox_path) || '\\'); }
+function lastFolder() { try { return localStorage.getItem('lfc_folder') || (me && me.inbox_path) || ''; } catch { return (me && me.inbox_path) || ''; } }
+$('#bfbrowse').onclick = () => openBrowser($('#bffolder').value, p => { $('#bffolder').value = p; $('#bfscan').click(); });
 $('#brup').onclick = () => brLoad(brCur === '\\' ? '\\' : brCur.replace(/\\[^\\]*$/, '') || '\\');
 $('#brcancel').onclick = () => { $('#browse').hidden = true; };
-$('#bruse').onclick = () => { $('#bffolder').value = brCur; $('#browse').hidden = true; $('#bfscan').click(); };
+$('#bruse').onclick = () => { $('#browse').hidden = true; if (brOnPick) brOnPick(brCur); };
 
 // ---- backfill panel ----
 let bfDocs = [];

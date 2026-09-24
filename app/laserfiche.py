@@ -143,12 +143,23 @@ class LaserficheClient:
 
     def _drop_edoc_if_present(self, entry_id: int) -> None:
         """Some API Server builds ignore keepPdfAfterImport; make sure only the LF pages remain."""
+        log = logging.getLogger("lf-capture")
         try:
             e = self._req("GET", f"/Entries/{entry_id}")
-            if e.get("isElectronicDocument") and (e.get("pageCount") or 0) > 0:
-                self._req("DELETE", f"/Entries/{entry_id}/Edoc")
+            if "pageCount" not in e:  # default projection may omit document properties; ask explicitly
+                try:
+                    e = self._req("GET", f"/Entries/{entry_id}", params={"$select": "pageCount,isElectronicDocument,extension"})
+                except LaserficheError:
+                    pass
+            pages = e.get("pageCount")
+            has_edoc = e.get("isElectronicDocument")
+            log.info("post-import %s: pageCount=%s isElectronicDocument=%s ext=%s", entry_id, pages, has_edoc, e.get("extension"))
+            if has_edoc is False or (pages is not None and pages <= 0):
+                return  # nothing to remove, or no pages to fall back on — keep the PDF
+            self._req("DELETE", f"/Entries/{entry_id}/Edoc")
+            log.info("removed edoc from %s", entry_id)
         except LaserficheError as exc:  # never fail the import over this
-            logging.getLogger("lf-capture").warning("could not remove edoc from %s: %s", entry_id, exc)
+            log.warning("could not remove edoc from %s: %s", entry_id, exc)
 
     # ---- existing documents (backfill) --------------------------------
     _DOC_SELECT = "id,name,fullPath,folderPath,entryType,templateName,templateId,extension,mimeType,pageCount,isElectronicDocument"
