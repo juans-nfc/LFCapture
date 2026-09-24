@@ -93,6 +93,9 @@
   #browse { position: absolute; top: 58px; left: 18px; width: min(560px, 90vw); max-height: 60vh; background: var(--pane); border: 1px solid var(--rule); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.12); display: flex; flex-direction: column; z-index: 10; }
   #browse .crumb { padding: 10px 14px; border-bottom: 1px solid var(--rule); display: flex; gap: 8px; align-items: center; font-size: 15px; }
   #browse .crumb code { background: #eef2ee; padding: 2px 6px; border-radius: 3px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #browse .find { padding: 8px 14px; border-bottom: 1px solid var(--rule); }
+  #browse .find input { font: inherit; width: 100%; border: 1px solid var(--rule); border-radius: 4px; padding: 6px 9px; }
+  #browse .find input:focus { outline: none; border-color: var(--green); }
   #browse ul { list-style: none; margin: 0; padding: 6px 0; overflow: auto; flex: 1; }
   #browse li { padding: 7px 14px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
   #browse li:hover { background: #f2f4f1; }
@@ -149,6 +152,7 @@
     </div>
     <div id="browse" hidden>
       <div class="crumb"><button class="btn" id="brup" title="Up one level">↑</button><code id="brpath">\</code></div>
+      <div class="find"><input id="brfind" placeholder="Type to find a folder here, e.g. 80552 — Enter opens the first match"></div>
       <ul id="brlist"></ul>
       <div class="actions"><span id="brinfo"></span><span style="flex:1"></span><button class="btn" id="brcancel">Cancel</button><button class="save" id="bruse" style="flex:0 0 auto">Use this folder</button></div>
     </div>
@@ -340,19 +344,30 @@ $('#refresh').onclick = async () => { await loadTemplates(true); setStatus(`${te
 for (const id of ['#upload', '#upload2']) $(id).onchange = e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('file', f); extract(fd); e.target.value = ''; };
 document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && job) save(); });
 // ---- folder browser ----
-let brCur = '\\';
+let brCur = '\\', brFolders = [], brDocs = 0;
+function brRender() {
+  const q = $('#brfind').value.trim().toLowerCase();
+  const shown = q ? brFolders.filter(f => (f.name || '').toLowerCase().includes(q)) : brFolders;
+  $('#brlist').innerHTML = shown.length
+    ? shown.map(f => `<li data-path="${esc(f.path)}"><span class="ico">▸</span>${esc(f.name)}</li>`).join('')
+    : `<li class="empty">${q ? 'No folder here matches "' + esc(q) + '"' : 'No subfolders'}</li>`;
+  $('#brinfo').textContent = `${brDocs} document${brDocs === 1 ? '' : 's'} here · ` +
+    (q ? `${shown.length} of ${brFolders.length} subfolders match` : `${brFolders.length} subfolder${brFolders.length === 1 ? '' : 's'}`);
+  document.querySelectorAll('#brlist li[data-path]').forEach(li => li.onclick = () => brLoad(li.dataset.path));
+}
 async function brLoad(path) {
-  $('#brlist').innerHTML = '<li class="empty">Loading…</li>'; $('#brinfo').textContent = '';
+  $('#brlist').innerHTML = '<li class="empty">Loading…</li>'; $('#brinfo').textContent = ''; $('#brfind').value = '';
   try {
     const r = await api('api/lf/folders?path=' + encodeURIComponent(path));
-    brCur = r.path; $('#brpath').textContent = brCur;
-    $('#brlist').innerHTML = r.folders.length
-      ? r.folders.map(f => `<li data-path="${esc(f.path)}"><span class="ico">▸</span>${esc(f.name)}</li>`).join('')
-      : '<li class="empty">No subfolders</li>';
-    $('#brinfo').textContent = `${r.documents} document${r.documents === 1 ? '' : 's'} here · ${r.folders.length} subfolder${r.folders.length === 1 ? '' : 's'}`;
-    document.querySelectorAll('#brlist li[data-path]').forEach(li => li.onclick = () => brLoad(li.dataset.path));
+    brCur = r.path; brFolders = r.folders; brDocs = r.documents; $('#brpath').textContent = brCur;
+    brRender(); $('#brfind').focus();
   } catch (e) { $('#brlist').innerHTML = `<li class="empty">${esc(e.message)}</li>`; }
 }
+$('#brfind').oninput = brRender;
+$('#brfind').onkeydown = e => {
+  if (e.key === 'Enter') { const first = document.querySelector('#brlist li[data-path]'); if (first) brLoad(first.dataset.path); e.preventDefault(); }
+  if (e.key === 'Escape') { $('#brfind').value = ''; brRender(); }
+};
 $('#bfbrowse').onclick = () => { $('#browse').hidden = false; brLoad($('#bffolder').value.trim() || '\\'); };
 $('#brup').onclick = () => brLoad(brCur === '\\' ? '\\' : brCur.replace(/\\[^\\]*$/, '') || '\\');
 $('#brcancel').onclick = () => { $('#browse').hidden = true; };
