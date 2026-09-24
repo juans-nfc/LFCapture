@@ -21,6 +21,24 @@ class LaserficheError(RuntimeError):
     pass
 
 
+def _tiff_to_pdf(data: bytes) -> bytes:
+    """Multi-page TIFF (as exported by Laserfiche) -> PDF, locally, without touching the pixels."""
+    import io
+    from PIL import Image, ImageSequence
+
+    im = Image.open(io.BytesIO(data))
+    pages = []
+    for frame in ImageSequence.Iterator(im):
+        f = frame.convert("RGB") if frame.mode not in ("RGB", "L") else frame.copy()
+        pages.append(f)
+    if not pages:
+        raise LaserficheError("TIFF export contained no pages")
+    out = io.BytesIO()
+    dpi = im.info.get("dpi", (200, 200))
+    pages[0].save(out, format="PDF", save_all=True, append_images=pages[1:], resolution=float(dpi[0] or 200))
+    return out.getvalue()
+
+
 class LaserficheClient:
     def __init__(self, username: str | None = None, password: str | None = None) -> None:
         self.base = os.environ["LF_BASE_URL"].rstrip("/")  # e.g. https://lf.northernfruit.com/LFRepositoryAPI
@@ -205,13 +223,15 @@ class LaserficheClient:
         has_edoc = entry.get("isElectronicDocument")
         ext = (entry.get("extension") or "").lower()
         mime = (entry.get("mimeType") or "").lower()
-        # Try the edoc first when it is (or may be) a PDF; fall back to rendering the LF pages to PDF.
+        # 1) the edoc itself when it is (or may be) a PDF — clean and fast.
+        # 2) otherwise the LF pages as a multi-page TIFF, converted to PDF locally. We avoid Laserfiche's
+        #    own pages->PDF render because it stamps a PDF4NET evaluation watermark on some builds.
         attempts = []
         if has_edoc is not False and (ext in ("pdf", "") and mime in ("application/pdf", "")):
-            attempts.append({"part": "Edoc"})
-        attempts.append({"part": "Image", "imageOptions": {"format": "PDF", "includeAnnotations": False}})
+            attempts.append(({"part": "Edoc"}, "pdf"))
+        attempts.append(({"part": "Image", "imageOptions": {"format": "MultiPageTIFF", "includeAnnotations": False}}, "tiff"))
         last = ""
-        for body in attempts:
+        for body, kind in attempts:
             try:
                 link = self._req("POST", f"/Entries/{entry_id}/Export", json=body).get("value")
                 if not link:
@@ -219,11 +239,16 @@ class LaserficheClient:
                 r = self._http.get(link, headers=self._headers(), follow_redirects=True)
                 if r.status_code >= 400:
                     last = f"download {r.status_code}"; continue
-                if r.content.startswith(b"%PDF"):
-                    return r.content
+                data = r.content
+                if data.startswith(b"%PDF"):
+                    return data
+                if kind == "tiff":
+                    return _tiff_to_pdf(data)
                 last = f"not a PDF ({r.headers.get('content-type')})"
             except LaserficheError as e:
                 last = str(e)
+            except Exception as e:  # conversion problems
+                last = f"{type(e).__name__}: {e}"
         raise LaserficheError(f"Export {entry_id} failed: {last}")
 
     def set_template(self, entry_id: int, template: str) -> None:

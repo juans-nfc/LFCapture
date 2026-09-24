@@ -6,3 +6,4 @@ anthropic>=0.40
 pydantic==2.*
 python-dotenv==1.*
 cryptography>=42
+Pillow>=10
