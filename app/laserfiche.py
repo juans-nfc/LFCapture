@@ -21,6 +21,24 @@ class LaserficheError(RuntimeError):
     pass
 
 
+def _pdf_to_tiff(pdf: bytes, dpi: int = 200) -> bytes:
+    """Render every PDF page to an image and pack them into one multi-page TIFF (LZW, RGB)."""
+    import io
+    import pymupdf as fitz
+    from PIL import Image
+
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    pages = []
+    for page in doc:
+        pix = page.get_pixmap(dpi=dpi, alpha=False)
+        pages.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+    if not pages:
+        raise LaserficheError("PDF has no pages to render")
+    out = io.BytesIO()
+    pages[0].save(out, format="TIFF", save_all=True, append_images=pages[1:], compression="tiff_lzw", dpi=(dpi, dpi))
+    return out.getvalue()
+
+
 def _tiff_to_pdf(data: bytes) -> bytes:
     """Multi-page TIFF (as exported by Laserfiche) -> PDF, locally, without touching the pixels."""
     import io
@@ -48,6 +66,10 @@ class LaserficheClient:
         self.generate_pages = os.environ.get("LF_GENERATE_PAGES", "1") != "0"
         # 0 (default) = pure Laserfiche document (pages + text); 1 = also keep the PDF as an electronic document
         self.keep_pdf = os.environ.get("LF_KEEP_PDF", "0") == "1"
+        # "pdf" = import the PDF and let Laserfiche generate pages (keeps the text layer);
+        # "tiff" = render pages locally and import a TIFF -> always a plain LF document, no PDF ever attached
+        self.import_mode = os.environ.get("LF_IMPORT_MODE", "pdf").lower()
+        self.tiff_dpi = int(os.environ.get("LF_TIFF_DPI", "200"))
         self._token: str | None = None
         self._expires_at = 0.0
         self._http = httpx.Client(timeout=120, verify=os.environ.get("LF_VERIFY_TLS", "1") != "0")
@@ -128,6 +150,8 @@ class LaserficheClient:
         """Create a document with template + fields under parent_id. Returns new entry id."""
         if not file_name.lower().endswith(".pdf"):
             file_name += ".pdf"
+        if self.import_mode == "tiff":
+            return self._import_tiff(parent_id, file_name[:-4], _pdf_to_tiff(pdf, self.tiff_dpi), template, fields)
         lf_fields = [
             {"name": name, "values": [v for v in vals if v not in (None, "")]}
             for name, vals in fields.items()
@@ -158,6 +182,23 @@ class LaserficheClient:
         if entry_id and self.generate_pages and not self.keep_pdf:
             self._drop_edoc_if_present(entry_id)
         return entry_id
+
+    def _import_tiff(self, parent_id: int, name: str, tiff: bytes, template: str, fields: dict[str, list[str]]) -> int:
+        lf_fields = [{"name": n, "values": [v for v in vals if v not in (None, "")]} for n, vals in fields.items()]
+        lf_fields = [f for f in lf_fields if f["values"]]
+        body = {"name": name, "autoRename": True, "metadata": {"templateName": template, "fields": lf_fields}}
+        r = self._http.post(
+            f"{self._repo_url}/Entries/{parent_id}/Folder/Import",
+            headers=self._headers(),
+            files={"file": (name + ".tif", tiff, "image/tiff"), "request": (None, json.dumps(body), "application/json")},
+        )
+        if r.status_code == 401:
+            self._token = None
+            r = self._http.post(f"{self._repo_url}/Entries/{parent_id}/Folder/Import", headers=self._headers(),
+                                files={"file": (name + ".tif", tiff, "image/tiff"), "request": (None, json.dumps(body), "application/json")})
+        if r.status_code >= 400:
+            raise LaserficheError(f"Import (tiff) failed ({r.status_code}): {r.text[:500]}")
+        return int(r.json().get("id") or 0)
 
     def _drop_edoc_if_present(self, entry_id: int) -> None:
         """Some API Server builds ignore keepPdfAfterImport; make sure only the LF pages remain."""
