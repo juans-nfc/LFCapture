@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LF Capture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f2f4f1; --pane: #ffffff; --ink: #1c2a22; --muted: #5e6b63;
+    --rule: #c9cfc8; --green: #2f6b3a; --green-ink: #ffffff; --amber: #b8791c; --red: #a33a2a;
+    --font: "Source Sans 3", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 16px/1.45 var(--font); color: var(--ink); background: var(--paper); display: flex; flex-direction: column; }
+
+  header { display: flex; align-items: baseline; gap: 20px; padding: 10px 18px; border-bottom: 1px solid var(--rule); background: var(--pane); }
+  header h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: .01em; }
+  header .queue { color: var(--muted); font-size: 15px; }
+  header .spacer { flex: 1; }
+  header button, .btn { font: inherit; border: 1px solid var(--rule); background: var(--pane); color: var(--ink); padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+  header button:hover, .btn:hover { border-color: var(--ink); }
+
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: 3fr 2fr; }
+  #viewer { background: #d9ddd8; border-right: 1px solid var(--rule); position: relative; }
+  #viewer iframe { width: 100%; height: 100%; border: 0; }
+  #viewer .empty { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: var(--muted); padding: 24px; }
+  #viewer .empty strong { display: block; color: var(--ink); font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+  #viewer .empty label { display: inline-block; margin-top: 14px; }
+  #viewer .empty input[type=file] { display: none; }
+
+  aside { background: var(--pane); display: flex; flex-direction: column; min-height: 0; }
+  aside .body { flex: 1; overflow: auto; padding: 18px 22px; }
+  aside .foot { border-top: 1px solid var(--rule); padding: 12px 22px; display: flex; gap: 10px; align-items: center; }
+
+  .summary { font-size: 17px; margin: 0 0 4px; }
+  .verdict { color: var(--muted); margin: 0 0 16px; }
+  .verdict.unsure { color: var(--amber); }
+  .notes { border-left: 3px solid var(--amber); padding: 6px 10px; margin: 0 0 16px; color: var(--ink); background: #fbf6ec; }
+
+  .row { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--rule); }
+  .row label { color: var(--muted); }
+  .row label .req { color: var(--red); margin-left: 3px; }
+  .row input, .row select, .row textarea { font: inherit; width: 100%; border: 0; border-bottom: 1px solid transparent; background: transparent; color: var(--ink); padding: 2px 0; outline: none; }
+  .row input:focus, .row select:focus, .row textarea:focus { border-bottom-color: var(--green); }
+  .row input.missing { border-bottom-color: var(--red); }
+  .row select { appearance: auto; }
+  .row.template { border-bottom: 2px solid var(--ink); margin-bottom: 8px; }
+  .row.template select { font-weight: 600; font-size: 17px; }
+  .multi .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--rule); border-radius: 3px; padding: 1px 6px; margin: 2px 4px 2px 0; }
+  .multi .chip button { border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0; font-size: 15px; }
+  .multi input { width: auto; min-width: 120px; }
+
+  .save { font: inherit; font-weight: 600; background: var(--green); color: var(--green-ink); border: 0; border-radius: 4px; padding: 10px 18px; cursor: pointer; flex: 1; }
+  .save:disabled { opacity: .5; cursor: default; }
+  .discard { color: var(--muted); }
+  .status { font-size: 15px; color: var(--muted); padding: 0 22px 10px; min-height: 22px; }
+  .status.err { color: var(--red); }
+  .status.ok { color: var(--green); }
+
+  .busy { position: absolute; inset: 0; background: rgba(242,244,241,.85); display: grid; place-content: center; color: var(--muted); font-size: 18px; }
+
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 45vh 1fr; }
+    #viewer { border-right: 0; border-bottom: 1px solid var(--rule); }
+    .row { grid-template-columns: 1fr; gap: 2px; }
+  }
+  @media (prefers-reduced-motion: no-preference) { .row input:focus { transition: border-color .15s; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>LF Capture</h1>
+  <span class="queue" id="queue">Checking inbox…</span>
+  <span class="spacer"></span>
+  <label class="btn">Upload PDF<input id="upload" type="file" accept="application/pdf" hidden></label>
+  <button id="refresh" title="Reload templates from Laserfiche">Reload templates</button>
+</header>
+
+<main>
+  <section id="viewer">
+    <div class="empty" id="empty">
+      <strong>Nothing to review</strong>
+      Drop PDFs in the inbox folder or upload one here.
+      <label class="btn">Choose a PDF<input id="upload2" type="file" accept="application/pdf"></label>
+    </div>
+    <iframe id="pdf" hidden></iframe>
+    <div class="busy" id="busy" hidden>Reading document…</div>
+  </section>
+
+  <aside>
+    <div class="body" id="form"></div>
+    <div class="status" id="status"></div>
+    <div class="foot">
+      <button class="save" id="save" disabled>Save to Laserfiche</button>
+      <button class="btn discard" id="discard" hidden>Discard</button>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let templates = [], job = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+function setStatus(msg, cls = '') { const s = $('#status'); s.textContent = msg; s.className = 'status ' + cls; }
+function busy(on) { $('#busy').hidden = !on; }
+
+async function loadTemplates(refresh = false) {
+  templates = await api('api/templates' + (refresh ? '?refresh=1' : ''));
+}
+
+async function loadQueue() {
+  const q = await api('api/queue');
+  const n = q.inbox.length + q.jobs.length;
+  $('#queue').textContent = n ? `${n} waiting` : 'Inbox empty';
+  return q;
+}
+
+async function nextFromQueue() {
+  const q = await loadQueue();
+  if (q.jobs.length) return showJob(await api(`api/job/${q.jobs[0].id}`));
+  if (q.inbox.length) {
+    const fd = new FormData(); fd.append('inbox_name', q.inbox[0]);
+    return extract(fd);
+  }
+  job = null; render();
+}
+
+async function extract(fd) {
+  busy(true); setStatus('');
+  try {
+    const res = await api('api/extract', { method: 'POST', body: fd });
+    if (res.auto_saved) { setStatus(`Auto-saved ${res.suggested_filename} as ${res.template} (entry ${res.entry_id})`, 'ok'); return nextFromQueue(); }
+    showJob(res);
+  } catch (e) { setStatus(e.message, 'err'); }
+  finally { busy(false); }
+}
+
+function showJob(res) {
+  job = res;
+  $('#pdf').src = `api/pdf/${res.id}#toolbar=0`;
+  render();
+  loadQueue();
+}
+
+function render() {
+  const has = !!job;
+  $('#empty').hidden = has; $('#pdf').hidden = !has;
+  $('#save').disabled = !has; $('#discard').hidden = !has;
+  const f = $('#form'); f.innerHTML = '';
+  if (!has) return;
+
+  const t = templates.find(x => x.name === job.template) || templates[0];
+  const sure = job.confidence >= 0.8;
+  f.insertAdjacentHTML('beforeend', `
+    <p class="summary">${esc(job.summary || 'Document read.')}</p>
+    <p class="verdict ${sure ? '' : 'unsure'}">${sure ? 'Confident about the template and key fields.' : 'Not sure about this one — check the template and fields before saving.'}</p>
+    ${job.notes ? `<p class="notes">${esc(job.notes)}</p>` : ''}
+    <div class="row template"><label>Template</label>
+      <select id="tpl">${templates.map(x => `<option ${x.name === t.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+    <div class="row"><label>File name</label><input id="fname" value="${esc(job.suggested_filename || job.source.replace(/\.pdf$/i, ''))}"></div>
+  `);
+  for (const fd of t.fields) f.appendChild(fieldRow(fd, job.fields[fd.name] || []));
+
+  $('#tpl').onchange = async () => {
+    busy(true); setStatus('Re-reading with the new template…');
+    try {
+      const b = new FormData(); b.append('template', $('#tpl').value);
+      const res = await api(`api/reextract/${job.id}`, { method: 'POST', body: b });
+      showJob(res); setStatus('');
+    } catch (e) { setStatus(e.message, 'err'); } finally { busy(false); }
+  };
+}
+
+function fieldRow(fd, values) {
+  const row = document.createElement('div'); row.className = 'row' + (fd.multi ? ' multi' : '');
+  row.dataset.field = fd.name;
+  row.innerHTML = `<label>${esc(fd.name)}${fd.required ? '<span class="req">*</span>' : ''}</label><div class="val"></div>`;
+  const val = row.querySelector('.val');
+  if (fd.multi) {
+    const chips = () => { val.querySelectorAll('.chip').forEach(c => c.remove());
+      values.forEach((v, i) => { const c = document.createElement('span'); c.className = 'chip'; c.innerHTML = `${esc(v)}<button title="Remove">×</button>`;
+        c.querySelector('button').onclick = () => { values.splice(i, 1); chips(); }; val.insertBefore(c, val.firstChild); }); };
+    const inp = document.createElement('input'); inp.placeholder = 'Add value, press Enter';
+    inp.onkeydown = e => { if (e.key === 'Enter' && inp.value.trim()) { values.push(inp.value.trim()); inp.value = ''; chips(); e.preventDefault(); } };
+    val.appendChild(inp); chips();
+    row.getValues = () => { if (inp.value.trim()) { values.push(inp.value.trim()); inp.value = ''; } return values.slice(); };
+  } else if (fd.list.length) {
+    const sel = document.createElement('select'); sel.innerHTML = '<option value=""></option>' + fd.list.map(v => `<option ${values[0] === v ? 'selected' : ''}>${esc(v)}</option>`).join('');
+    val.appendChild(sel); row.getValues = () => sel.value ? [sel.value] : [];
+  } else {
+    const inp = document.createElement('input'); inp.value = values[0] || '';
+    if (fd.type === 'Date') inp.type = 'date';
+    val.appendChild(inp); row.getValues = () => inp.value ? [inp.value] : [];
+  }
+  return row;
+}
+
+async function save() {
+  const t = templates.find(x => x.name === $('#tpl').value);
+  const fields = {}; let missing = false;
+  for (const row of document.querySelectorAll('.row[data-field]')) {
+    const v = row.getValues(); fields[row.dataset.field] = v;
+    const def = t.fields.find(f => f.name === row.dataset.field);
+    const inp = row.querySelector('input,select'); if (inp) inp.classList.toggle('missing', def.required && !v.length);
+    if (def.required && !v.length) missing = true;
+  }
+  if (missing) return setStatus('Fill the required fields marked *', 'err');
+  $('#save').disabled = true; setStatus('Saving…');
+  try {
+    const res = await api(`api/save/${job.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template: t.name, fields, filename: $('#fname').value || job.source }) });
+    setStatus(`Saved as ${t.name} (entry ${res.entry_id})`, 'ok');
+    await nextFromQueue();
+  } catch (e) { setStatus(e.message, 'err'); $('#save').disabled = false; }
+}
+
+$('#save').onclick = save;
+$('#discard').onclick = async () => { if (confirm('Discard this document? It moves to inbox/_failed.')) { await api(`api/job/${job.id}`, { method: 'DELETE' }); nextFromQueue(); } };
+$('#refresh').onclick = async () => { await loadTemplates(true); setStatus(`${templates.length} templates loaded`, 'ok'); render(); };
+for (const id of ['#upload', '#upload2']) $(id).onchange = e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('file', f); extract(fd); e.target.value = ''; };
+document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && job) save(); });
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+(async () => {
+  try { await loadTemplates(); await nextFromQueue(); setInterval(() => { if (!job) nextFromQueue(); else loadQueue(); }, 15000); }
+  catch (e) { setStatus(e.message, 'err'); $('#queue').textContent = 'Laserfiche unreachable'; }
+})();
+</script>
+</body>
+</html>

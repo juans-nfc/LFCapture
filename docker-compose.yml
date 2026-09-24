@@ -1,0 +1,13 @@
+services:
+  lf-capture:
+    build: .
+    container_name: lf-capture
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8087:8080"
+    volumes:
+      - ./inbox:/data/inbox
+      - lfcapture-work:/data/work
+volumes:
+  lfcapture-work:
