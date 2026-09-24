@@ -5,9 +5,15 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "8087:8080"
+      - "127.0.0.1:8096:8080"     # only nginx talks to it; not exposed on the LAN
     volumes:
-      - ./inbox:/data/inbox
-      - lfcapture-work:/data/work
+      - ./inbox:/data/inbox       # drop folder (optional; share this out if you want scan-to-folder)
+      - lfcapture-work:/data/work # in-flight jobs awaiting review
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   lfcapture-work:
