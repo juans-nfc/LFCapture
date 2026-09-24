@@ -73,7 +73,7 @@ class LaserficheClient:
         for t in self._req("GET", "/TemplateDefinitions").get("value", []):
             if allow and t["name"] not in allow:
                 continue
-            fields = self._req("GET", f"/TemplateDefinitions/{t['id']}/Fields").get("value", [])
+            fields = self._req("GET", f"/TemplateDefinitions/{t['id']}/FieldDefinitions").get("value", [])
             out.append(
                 {
                     "id": t["id"],
