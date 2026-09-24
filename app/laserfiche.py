@@ -27,6 +27,8 @@ class LaserficheClient:
         self.user = username if username is not None else os.environ.get("LF_USERNAME", "")
         self.password = password if password is not None else os.environ.get("LF_PASSWORD", "")
         self.generate_pages = os.environ.get("LF_GENERATE_PAGES", "1") != "0"
+        # 0 (default) = pure Laserfiche document (pages + text); 1 = also keep the PDF as an electronic document
+        self.keep_pdf = os.environ.get("LF_KEEP_PDF", "0") == "1"
         self._token: str | None = None
         self._expires_at = 0.0
         self._http = httpx.Client(timeout=120, verify=os.environ.get("LF_VERIFY_TLS", "1") != "0")
@@ -115,7 +117,8 @@ class LaserficheClient:
         body = {
             "name": file_name[:-4],
             "autoRename": True,
-            "pdfOptions": {"generatePages": self.generate_pages, "generatePagesImageType": "StandardColor", "keepPdfAfterImport": True},
+            "pdfOptions": {"generatePages": self.generate_pages, "generatePagesImageType": "StandardColor",
+                           "generateText": True, "keepPdfAfterImport": self.keep_pdf or not self.generate_pages},
             "metadata": {"templateName": template, "fields": lf_fields},
         }
         r = self._http.post(
