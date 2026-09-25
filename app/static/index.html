@@ -21,7 +21,9 @@
   header h1 svg { width: 20px; height: 20px; }
   header .queue { color: rgba(255,255,255,.8); font-size: 14px; }
   header .spacer { flex: 1; }
-  header .who { color: rgba(255,255,255,.9); font-size: 14px; }
+  header .who { color: #fff; font-size: 14px; font-weight: 600; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35); padding: 3px 10px; border-radius: 999px; display: inline-flex; align-items: center; gap: 6px; }
+  header .who:empty { display: none; }
+  header .who::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #7ee081; box-shadow: 0 0 0 2px rgba(255,255,255,.25); }
   header button, header .btn { font: inherit; font-size: 14px; border: 1px solid rgba(255,255,255,.55); background: transparent; color: #fff; padding: 4px 12px; border-radius: 6px; cursor: pointer; }
   header button:hover, header .btn:hover { background: rgba(255,255,255,.14); border-color: #fff; }
   header button.link { border: 0; padding: 4px 6px; text-decoration: underline; text-underline-offset: 3px; }
