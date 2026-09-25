@@ -88,6 +88,10 @@
   #settings input { font: inherit; width: 100%; border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px; }
   #settings input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(27,94,166,.15); }
   #settings .actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+  #settings .actions .save { flex: 0 0 auto; padding: 9px 22px; }
+  #settings .fine { margin: 16px 0 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
+  #settings.required { background: var(--paper); }
+  #settings.required .box { box-shadow: 0 1px 3px rgba(0,0,0,.08); border: 1px solid var(--rule); }
   #settings .err { color: var(--red); font-size: 15px; min-height: 20px; margin-top: 8px; }
   header .who { color: var(--muted); font-size: 14px; }
 
@@ -139,19 +143,20 @@
 </header>
 
 <div id="settings" hidden>
-  <div class="box">
-    <h2>Laserfiche login</h2>
-    <p>Documents are read and saved with <em>your</em> Laserfiche account, so you only see what you have rights to and the audit trail shows your name. Stored encrypted on the tools server.</p>
-    <label>Laserfiche username</label><input id="lfuser" autocomplete="username" placeholder="northernfruit\juans  or  juans@northernfruit.com">
-    <label>Password</label><input id="lfpass" type="password" autocomplete="current-password">
+  <form class="box" id="setform" method="post" action="api/settings/lf" autocomplete="on">
+    <h2>Sign in to Laserfiche</h2>
+    <p id="setrepo"></p>
+    <label for="lfuser">User name</label><input id="lfuser" name="username" autocomplete="username" placeholder="northernfruit\juans  or  juans@northernfruit.com" required>
+    <label for="lfpass">Password</label><input id="lfpass" name="password" type="password" autocomplete="current-password" required>
     <div class="err" id="seterr"></div>
     <div class="actions">
-      <button class="save" id="setsave">Save &amp; test</button>
-      <button class="btn" id="setcancel">Cancel</button>
+      <button class="save" id="setsave" type="submit">Sign in</button>
+      <button class="btn" id="setcancel" type="button">Cancel</button>
       <span style="flex:1"></span>
-      <button class="btn" id="setforget" hidden>Sign out</button>
+      <button class="btn" id="setforget" type="button" hidden>Sign out</button>
     </div>
-  </div>
+    <p class="fine">Documents are read and saved with your own Laserfiche account, so you only see what you have rights to and the audit trail shows your name. Your password is stored encrypted on the tools server; the sign-in lasts 30 days in this browser.</p>
+  </form>
 </div>
 <main style="position:relative">
     <div id="browse" hidden>
@@ -217,24 +222,29 @@ async function loadMe() {
   try { me = await api('api/me'); $('#who').textContent = me.lf_username || ''; $('#signout').hidden = !me.lf_username; } catch { me = null; }
   return me;
 }
+const lastUser = () => { try { return localStorage.getItem('lfc_last_user') || ''; } catch { return ''; } };
 function openSettings(required = false) {
-  $('#settings').hidden = false; $('#seterr').textContent = required ? 'Your Laserfiche login is needed before the tool can read or save documents.' : '';
-  $('#lfuser').value = (me && (me.lf_username || me.proxy_email)) || ''; $('#lfpass').value = '';
+  $('#settings').hidden = false; $('#settings').classList.toggle('required', required);
+  $('#seterr').textContent = '';
+  $('#setrepo').textContent = me && me.repository ? `Repository: ${me.repository}` : '';
+  $('#lfuser').value = (me && (me.lf_username || me.proxy_email)) || lastUser(); $('#lfpass').value = '';
   $('#setforget').hidden = !(me && me.has_lf_creds); $('#setcancel').hidden = required && !(me && me.has_lf_creds);
   ($('#lfuser').value ? $('#lfpass') : $('#lfuser')).focus();
 }
 $('#setopen').onclick = () => openSettings(false);
 $('#setcancel').onclick = () => { $('#settings').hidden = true; };
-$('#setsave').onclick = async () => {
-  $('#seterr').textContent = 'Testing login…';
+$('#setform').onsubmit = async e => {
+  e.preventDefault();
+  $('#seterr').textContent = 'Signing in…'; $('#setsave').disabled = true;
   try {
-    await api('api/settings/lf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#lfuser').value, password: $('#lfpass').value }) });
+    await api('api/settings/lf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#lfuser').value.trim(), password: $('#lfpass').value }) });
+    try { localStorage.setItem('lfc_last_user', $('#lfuser').value.trim()); } catch {}
     $('#settings').hidden = true; await loadMe(); await loadTemplates(); $('#queue').textContent = ''; setStatus(`Signed in to Laserfiche as ${me.lf_username}`, 'ok'); nextFromQueue().catch(() => {});
-  } catch (e) { $('#seterr').textContent = e.message; }
+  } catch (err) { $('#seterr').textContent = err.message; }
+  finally { $('#setsave').disabled = false; }
 };
 $('#signout').onclick = () => $('#setforget').click();
 $('#setforget').onclick = async () => { if (confirm('Sign out and remove your stored Laserfiche login?')) { await api('api/settings/lf', { method: 'DELETE' }); await loadMe(); job = null; render(); openSettings(true); } };
-$('#lfpass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#setsave').click(); });
 function setStatus(msg, cls = '') { const s = $('#status'); s.textContent = msg; s.className = 'status ' + cls; }
 function busy(on) { $('#busy').hidden = !on; }
 
