@@ -108,6 +108,7 @@ def api_me(request: Request):
     u = users.current_user(request)
     creds = users.get_creds(u) if u else None
     return {"lf_username": creds["username"] if creds else None, "has_lf_creds": bool(creds),
+            "proxy_email": (request.headers.get("x-auth-request-email") or "").strip().lower() or None,  # from oauth2-proxy, if configured
             "inbox_path": os.environ.get("LF_INBOX_PATH", ""),
             "mailbox_enabled": bool(os.environ.get("MAIL_MAILBOX")) and _svc is not None}
 

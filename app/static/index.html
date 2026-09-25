@@ -219,9 +219,9 @@ async function loadMe() {
 }
 function openSettings(required = false) {
   $('#settings').hidden = false; $('#seterr').textContent = required ? 'Your Laserfiche login is needed before the tool can read or save documents.' : '';
-  $('#lfuser').value = (me && me.lf_username) || ''; $('#lfpass').value = '';
+  $('#lfuser').value = (me && (me.lf_username || me.proxy_email)) || ''; $('#lfpass').value = '';
   $('#setforget').hidden = !(me && me.has_lf_creds); $('#setcancel').hidden = required && !(me && me.has_lf_creds);
-  $('#lfuser').focus();
+  ($('#lfuser').value ? $('#lfpass') : $('#lfuser')).focus();
 }
 $('#setopen').onclick = () => openSettings(false);
 $('#setcancel').onclick = () => { $('#settings').hidden = true; };
@@ -301,7 +301,7 @@ function render() {
   $('#save').disabled = !t;
   $('#save').textContent = job.lf_path ? 'Update metadata in Laserfiche' : 'Save to Laserfiche';
 
-  if ($('#folderbrowse')) $('#folderbrowse').onclick = () => openBrowser($('#folder').value, p => { $('#folder').value = p; try { localStorage.setItem('lfc_folder', p); } catch {} });
+  if ($('#folderbrowse')) $('#folderbrowse').onclick = () => openBrowser($('#folder').value, p => { $('#folder').value = p; remember('folder', p); });
   $('#tpl').onchange = async () => {
     busy(true); setStatus('Re-reading with the new template…');
     try {
@@ -353,7 +353,7 @@ async function save() {
   try {
     const res = await api(`api/save/${job.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ template: t.name, fields, filename: $('#fname').value || job.source, folder: ($('#folder') && $('#folder').value.trim()) || null }) });
-    try { if ($('#folder') && $('#folder').value.trim()) localStorage.setItem('lfc_folder', $('#folder').value.trim()); } catch {}
+    if ($('#folder') && $('#folder').value.trim()) remember('folder', $('#folder').value.trim());
     setStatus(job.lf_path ? `Updated entry ${res.entry_id} (${t.name})` : `Saved as ${t.name} (entry ${res.entry_id})`, 'ok');
     await nextFromQueue();
   } catch (e) { setStatus(e.message, 'err'); $('#save').disabled = false; }
@@ -381,6 +381,7 @@ async function brLoad(path) {
   try {
     const r = await api('api/lf/folders?path=' + encodeURIComponent(path));
     brCur = r.path; brFolders = r.folders; brDocs = r.documents; $('#brpath').textContent = brCur;
+    remember('browsed', brCur);
     brRender(); $('#brfind').focus();
   } catch (e) { $('#brlist').innerHTML = `<li class="empty">${esc(e.message)}</li>`; }
 }
@@ -390,8 +391,15 @@ $('#brfind').onkeydown = e => {
   if (e.key === 'Escape') { $('#brfind').value = ''; brRender(); }
 };
 let brOnPick = null;
-function openBrowser(startPath, onPick) { brOnPick = onPick; $('#browse').hidden = false; brLoad((startPath || '').trim() || (me && me.inbox_path) || '\\'); }
-function lastFolder() { try { return localStorage.getItem('lfc_folder') || (me && me.inbox_path) || ''; } catch { return (me && me.inbox_path) || ''; } }
+const uKey = k => `lfc_${k}_${(me && me.lf_username || 'anon').toLowerCase()}`;   // remembered per user, in this browser
+const remember = (k, v) => { try { localStorage.setItem(uKey(k), v); } catch {} };
+const recall = k => { try { return localStorage.getItem(uKey(k)) || ''; } catch { return ''; } };
+function openBrowser(startPath, onPick) {
+  brOnPick = onPick; $('#browse').hidden = false;
+  // start where this user last browsed; fall back to the field's value, then the inbox
+  brLoad(recall('browsed') || (startPath || '').trim() || (me && me.inbox_path) || '\\');
+}
+function lastFolder() { return recall('folder') || (me && me.inbox_path) || ''; }
 $('#bfbrowse').onclick = () => openBrowser($('#bffolder').value, p => { $('#bffolder').value = p; $('#bfscan').click(); });
 $('#brup').onclick = () => brLoad(brCur === '\\' ? '\\' : brCur.replace(/\\[^\\]*$/, '') || '\\');
 $('#brcancel').onclick = () => { $('#browse').hidden = true; };
@@ -399,10 +407,11 @@ $('#bruse').onclick = () => { $('#browse').hidden = true; if (brOnPick) brOnPick
 
 // ---- backfill panel ----
 let bfDocs = [];
-$('#bfopen').onclick = () => { $('#bf').hidden = false; $('#bffolder').focus(); pollBf(); };
+$('#bfopen').onclick = () => { $('#bf').hidden = false; if (!$('#bffolder').value) $('#bffolder').value = recall('scan'); $('#bffolder').focus(); pollBf(); };
 $('#bfclose').onclick = () => { $('#bf').hidden = true; };
 $('#bfscan').onclick = async () => {
   const folder = $('#bffolder').value.trim(); if (!folder) return;
+  remember('scan', folder);
   $('#bfinfo').textContent = 'Scanning…'; $('#bfqueue').disabled = true; $('#bftable').innerHTML = '';
   try {
     const r = await api('api/backfill/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' },
