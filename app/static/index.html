@@ -90,8 +90,17 @@
   #settings .actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
   #settings .actions .save { flex: 0 0 auto; padding: 9px 22px; }
   #settings .fine { margin: 16px 0 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
-  #settings.required { background: var(--paper); }
-  #settings.required .box { box-shadow: 0 1px 3px rgba(0,0,0,.08); border: 1px solid var(--rule); }
+  /* first-visit sign-in: full page under the blue bar, card top-centred — same as LF Docs */
+  #settings.required { top: 42px; background: var(--paper); display: block; }
+  #settings.required .box { width: min(870px, 92vw); margin: 16px auto 0; padding: 22px 20px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); border: 1px solid #e3e7ec; border-radius: 10px; }
+  #settings.required .fine, #settings.required #setcancel { display: none; }
+  #settings .box h2 { font-size: 18px; }
+  #settings .box p { margin: 0 0 12px; font-size: 16px; }
+  #settings label { font-size: 15px; margin: 12px 0 6px; }
+  #settings input { padding: 11px 12px; font-size: 15px; }
+  #settings .actions { margin-top: 14px; }
+  #settings .actions .save { padding: 11px 20px; font-size: 15px; }
+  body.signin header > :not(h1) { display: none; }
   #settings .err { color: var(--red); font-size: 15px; min-height: 20px; margin-top: 8px; }
   header .who { color: var(--muted); font-size: 14px; }
 
@@ -224,7 +233,7 @@ async function loadMe() {
 }
 const lastUser = () => { try { return localStorage.getItem('lfc_last_user') || ''; } catch { return ''; } };
 function openSettings(required = false) {
-  $('#settings').hidden = false; $('#settings').classList.toggle('required', required);
+  $('#settings').hidden = false; $('#settings').classList.toggle('required', required); document.body.classList.toggle('signin', required);
   $('#seterr').textContent = '';
   $('#setrepo').textContent = me && me.repository ? `Repository: ${me.repository}` : '';
   $('#lfuser').value = (me && (me.lf_username || me.proxy_email)) || lastUser(); $('#lfpass').value = '';
@@ -232,14 +241,14 @@ function openSettings(required = false) {
   ($('#lfuser').value ? $('#lfpass') : $('#lfuser')).focus();
 }
 $('#setopen').onclick = () => openSettings(false);
-$('#setcancel').onclick = () => { $('#settings').hidden = true; };
+$('#setcancel').onclick = () => { $('#settings').hidden = true; document.body.classList.remove('signin'); };
 $('#setform').onsubmit = async e => {
   e.preventDefault();
   $('#seterr').textContent = 'Signing in…'; $('#setsave').disabled = true;
   try {
     await api('api/settings/lf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#lfuser').value.trim(), password: $('#lfpass').value }) });
     try { localStorage.setItem('lfc_last_user', $('#lfuser').value.trim()); } catch {}
-    $('#settings').hidden = true; await loadMe(); await loadTemplates(); $('#queue').textContent = ''; setStatus(`Signed in to Laserfiche as ${me.lf_username}`, 'ok'); nextFromQueue().catch(() => {});
+    $('#settings').hidden = true; document.body.classList.remove('signin'); await loadMe(); await loadTemplates(); $('#queue').textContent = ''; setStatus(`Signed in to Laserfiche as ${me.lf_username}`, 'ok'); nextFromQueue().catch(() => {});
   } catch (err) { $('#seterr').textContent = err.message; }
   finally { $('#setsave').disabled = false; }
 };
