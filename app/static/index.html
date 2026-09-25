@@ -415,8 +415,8 @@ const remember = (k, v) => { try { localStorage.setItem(uKey(k), v); } catch {} 
 const recall = k => { try { return localStorage.getItem(uKey(k)) || ''; } catch { return ''; } };
 function openBrowser(startPath, onPick) {
   brOnPick = onPick; $('#browse').hidden = false;
-  // start where this user last browsed; fall back to the field's value, then the inbox
-  brLoad(recall('browsed') || (startPath || '').trim() || (me && me.inbox_path) || '\\');
+  // start where this user last browsed; first time ever, the repository root
+  brLoad(recall('browsed') || '\\');
 }
 function lastFolder() { return recall('folder') || (me && me.inbox_path) || ''; }
 $('#bfbrowse').onclick = () => openBrowser($('#bffolder').value, p => { $('#bffolder').value = p; $('#bfscan').click(); });
