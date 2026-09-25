@@ -245,7 +245,7 @@ async function loadTemplates(refresh = false) {
 async function loadQueue() {
   const q = await api('api/queue');
   const n = q.inbox.length + q.jobs.length;
-  $('#queue').textContent = n ? `${n} waiting` : 'Inbox empty';
+  $('#queue').textContent = !n ? 'Nothing waiting' : (q.shared ? `${q.mine} yours · ${q.shared} shared` : `${q.mine} yours`);
   return q;
 }
 

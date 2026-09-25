@@ -65,19 +65,25 @@ def folder_entry_id(lf: LaserficheClient, path: str | None = None) -> int:
     return _folder_ids[path]
 
 
-def _job_dir(job_id: str) -> Path:
+def _job_dir(job_id: str, user: str | None = None) -> Path:
+    """Job folder; when a user is given, enforce that the job is theirs or shared (no owner)."""
     d = WORK / job_id
     if not d.exists():
         raise HTTPException(404, "Unknown job")
+    if user is not None:
+        m = d / "meta.json"
+        owner = json.loads(m.read_text()).get("owner") if m.exists() else None
+        if owner and owner != user:
+            raise HTTPException(403, "That document is in another user's queue")
     return d
 
 
-def _new_job(pdf_bytes: bytes, source_name: str, context: str = "") -> str:
+def _new_job(pdf_bytes: bytes, source_name: str, context: str = "", owner: str | None = None) -> str:
     job_id = uuid.uuid4().hex[:12]
     d = WORK / job_id
     d.mkdir()
     (d / "doc.pdf").write_bytes(pdf_bytes)
-    (d / "meta.json").write_text(json.dumps({"source": source_name, "created": time.time(), "context": context}))
+    (d / "meta.json").write_text(json.dumps({"source": source_name, "created": time.time(), "context": context, "owner": owner}))
     return job_id
 
 
@@ -139,22 +145,30 @@ def api_templates(refresh: bool = False, lf: LaserficheClient = Depends(users.lf
 
 
 @app.get("/api/queue")
-def api_queue():
-    """PDFs waiting in the drop folder, plus jobs already extracted but not saved."""
+def api_queue(request: Request):
+    """Drop-folder PDFs (shared) plus extracted-but-unsaved jobs: the caller's own first, then shared ones."""
+    user = users.current_user(request)
     pending = sorted(p.name for p in INBOX.glob("*.pdf"))
-    jobs = []
+    mine, shared = [], []
     for d in sorted(WORK.iterdir(), key=lambda p: p.stat().st_mtime):
         m = d / "meta.json"
-        if m.exists():
-            meta = json.loads(m.read_text())
-            if "template" not in meta and "notes" not in meta:
-                continue  # extraction still running (or crashed mid-way); not reviewable yet
-            jobs.append({"id": d.name, "source": meta.get("source"), "template": meta.get("template"), "confidence": meta.get("confidence"), "lf_path": meta.get("lf_path")})
-    return {"inbox": pending, "jobs": jobs}
+        if not d.is_dir() or not m.exists():
+            continue
+        meta = json.loads(m.read_text())
+        if "template" not in meta and "notes" not in meta:
+            continue  # extraction still running (or crashed mid-way); not reviewable yet
+        row = {"id": d.name, "source": meta.get("source"), "template": meta.get("template"), "confidence": meta.get("confidence"),
+               "lf_path": meta.get("lf_path"), "owner": meta.get("owner")}
+        if not meta.get("owner"):
+            shared.append(row)
+        elif meta.get("owner") == user:
+            mine.append(row)
+    return {"inbox": pending, "jobs": mine + shared, "mine": len(mine), "shared": len(shared) + len(pending)}
 
 
 @app.post("/api/extract")
-async def api_extract(file: UploadFile | None = File(None), inbox_name: str | None = Form(None), template: str | None = Form(None), lf: LaserficheClient = Depends(users.lf_for)):
+async def api_extract(request: Request, file: UploadFile | None = File(None), inbox_name: str | None = Form(None), template: str | None = Form(None), lf: LaserficheClient = Depends(users.lf_for)):
+    owner = users.current_user(request) if file is not None else None
     if file is not None:
         data = await file.read()
         name = file.filename or "upload.pdf"
@@ -169,7 +183,7 @@ async def api_extract(file: UploadFile | None = File(None), inbox_name: str | No
         raise HTTPException(400, "Send a file or an inbox_name")
     if not data.startswith(b"%PDF"):
         raise HTTPException(400, "Not a PDF")
-    job_id = _new_job(data, name)
+    job_id = _new_job(data, name, owner=owner)
     try:
         result = _run_extract(job_id, template or None, lf)
     except Exception as e:  # surface the reason to the UI and drop the half-made job
@@ -184,7 +198,8 @@ async def api_extract(file: UploadFile | None = File(None), inbox_name: str | No
 
 
 @app.post("/api/reextract/{job_id}")
-def api_reextract(job_id: str, template: str = Form(...), lf: LaserficheClient = Depends(users.lf_for)):
+def api_reextract(job_id: str, request: Request, template: str = Form(...), lf: LaserficheClient = Depends(users.lf_for)):
+    _job_dir(job_id, users.current_user(request))
     try:
         return _run_extract(job_id, template, lf)
     except Exception as e:
@@ -192,13 +207,13 @@ def api_reextract(job_id: str, template: str = Form(...), lf: LaserficheClient =
 
 
 @app.get("/api/job/{job_id}")
-def api_job(job_id: str):
-    return {"id": job_id, **json.loads((_job_dir(job_id) / "meta.json").read_text())}
+def api_job(job_id: str, request: Request):
+    return {"id": job_id, **json.loads((_job_dir(job_id, users.require_user(request)) / "meta.json").read_text())}
 
 
 @app.get("/api/pdf/{job_id}")
-def api_pdf(job_id: str):
-    return FileResponse(_job_dir(job_id) / "doc.pdf", media_type="application/pdf")
+def api_pdf(job_id: str, request: Request):
+    return FileResponse(_job_dir(job_id, users.require_user(request)) / "doc.pdf", media_type="application/pdf")
 
 
 class SaveRequest(BaseModel):
@@ -239,7 +254,8 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
 
 
 @app.post("/api/save/{job_id}")
-def api_save(job_id: str, req: SaveRequest, lf: LaserficheClient = Depends(users.lf_for)):
+def api_save(job_id: str, req: SaveRequest, request: Request, lf: LaserficheClient = Depends(users.lf_for)):
+    _job_dir(job_id, users.current_user(request))
     try:
         return _save(job_id, req.template, req.fields, req.filename, lf, req.folder)
     except LaserficheError as e:
@@ -247,8 +263,8 @@ def api_save(job_id: str, req: SaveRequest, lf: LaserficheClient = Depends(users
 
 
 @app.delete("/api/job/{job_id}")
-def api_discard(job_id: str):
-    d = _job_dir(job_id)
+def api_discard(job_id: str, request: Request):
+    d = _job_dir(job_id, users.require_user(request))
     meta = json.loads((d / "meta.json").read_text())
     claimed = WORK / f"{meta.get('source', '')}.claimed"
     if claimed.exists():
@@ -345,7 +361,7 @@ def _backfill_one(entry_id: int, email: str) -> None:
            f"Current template: {entry.get('templateName') or 'none'}\n"
            f"Existing field values (keep them unless the document clearly says otherwise): "
            f"{json.dumps(existing) if existing else 'none'}")
-    job_id = _new_job(pdf, f"LF {entry_id}: {entry.get('name')}", ctx)
+    job_id = _new_job(pdf, f"LF {entry_id}: {entry.get('name')}", ctx, owner=email)
     m = WORK / job_id / "meta.json"
     m.write_text(json.dumps({**json.loads(m.read_text()), "lf_entry_id": entry_id, "lf_path": entry.get("fullPath"),
                              "lf_template": entry.get("templateName"), "lf_fields": existing, "owner": email}))
