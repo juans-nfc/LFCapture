@@ -24,9 +24,9 @@ its own session cookie (30 days). No dependency on proxy identity headers. Reads
 Laserfiche's own rights and audit trail apply. `LF_USERNAME`/`LF_PASSWORD` (service account) are only
 needed for the unattended mailbox capture.
 
-## Backfill — documents already in Laserfiche
-Header → **Backfill**. Enter a folder path (`\Sales\Orders\80552-00`), optionally include subfolders,
-choose "documents with no template" or all, **Scan**, tick the ones you want, **Queue for review**.
+## From Laserfiche — documents already in the repository
+Header → **From Laserfiche**. Enter a folder path (`\Sales\Orders\80552-00`), optionally include subfolders,
+choose "documents with no template" or all, **Scan**, tick the ones you want, **Read & add to review**.
 Each document is exported (edoc if it is a PDF, otherwise the LF pages rendered to PDF), read by Claude
 with its current path/template/field values as context, and dropped into the normal review queue.
 **Update metadata in Laserfiche** sets the template and fields on the existing entry in place — no

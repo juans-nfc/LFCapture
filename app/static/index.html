@@ -121,7 +121,7 @@
   <span class="spacer"></span>
   <span class="who" id="who"></span>
   <button id="setopen" title="Your Laserfiche login">Settings</button>
-  <button id="bfopen" title="Read documents already in Laserfiche">Backfill</button>
+  <button id="bfopen" title="Read documents already in Laserfiche and fill in their metadata">From Laserfiche</button>
   <label class="btn">Upload PDF<input id="upload" type="file" accept="application/pdf" hidden></label>
   <button id="refresh" title="Reload templates from Laserfiche">Reload templates</button>
 </header>
@@ -151,8 +151,8 @@
 
   <section id="bf" hidden>
     <div class="head">
-      <strong>Backfill from Laserfiche</strong>
-      <input id="bffolder" type="text" placeholder="\Sales\Orders\80552-00  (folder path in Laserfiche)">
+      <strong>Read documents already in Laserfiche</strong>
+      <input id="bffolder" type="text" placeholder="Folder in Laserfiche, e.g. \Sales\Orders\80552-00 — or Browse…">
       <button class="btn" id="bfbrowse" title="Browse Laserfiche folders">Browse…</button>
       <label><input id="bfrec" type="checkbox"> include subfolders</label>
       <label><select id="bffilter"><option value="1">documents with no template</option><option value="0">all documents</option></select></label>
@@ -164,7 +164,7 @@
       <span id="bfinfo">Enter a folder and scan.</span>
       <span class="spacer" style="flex:1"></span>
       <span id="bfstatus"></span>
-      <button class="save" id="bfqueue" style="flex:0 0 auto" disabled>Queue for review</button>
+      <button class="save" id="bfqueue" style="flex:0 0 auto" disabled>Read &amp; add to review</button>
     </div>
   </section>
   <section id="viewer">
@@ -407,7 +407,7 @@ $('#bfqueue').onclick = async () => {
   if (!ids.length) return;
   if (!confirm(`Read ${ids.length} document${ids.length === 1 ? '' : 's'} and add them to the review queue? Nothing is written to Laserfiche until you press Update on each one.`)) return;
   const r = await api('api/backfill/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_ids: ids }) });
-  $('#bfinfo').textContent = `${r.queued} queued — they appear in the review queue as they finish reading.`;
+  $('#bfinfo').textContent = `${r.queued} being read — they appear in the review queue as they finish. Close this panel to review.`;
   $('#bfscan').click();
 };
 async function pollBf() {
