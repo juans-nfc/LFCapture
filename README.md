@@ -29,9 +29,17 @@ Header → **From Laserfiche**. Enter a folder path (`\Sales\Orders\80552-00`), 
 choose "documents with no template" or all, **Scan**, tick the ones you want, **Read & add to review**.
 Each document is exported (edoc if it is a PDF, otherwise the LF pages rendered to PDF), read by Claude
 with its current path/template/field values as context, and dropped into the normal review queue.
+For documents that already have a template, choose what happens: **keep template, fill in blanks**
+(default — existing values are never changed, Claude only proposes values for empty fields) or
+**re-read from scratch** (Claude picks the template fresh and proposes every value; the review page
+shows the current Laserfiche value under anything that would change and flags a template change).
 **Update metadata in Laserfiche** sets the template and fields on the existing entry in place — no
 re-import, entry ID and history unchanged. Nothing is written until you press Update on each one.
 Template descriptions and field descriptions in Laserfiche are passed to Claude; fill them in to steer it.
+
+## Read from inside Laserfiche (Business Process)
+See `docs-in-laserfiche-setup.md`: a Workflow business process posts entry IDs to `/api/lf/read`; the tool
+writes template + fields straight onto the entries and tags them `AI-Proposed` / `AI-Unsure` for review in LF.
 
 ## Mailbox capture (AS400 path)
 Point the AS400 (or any sender) at a capture mailbox and set the `MAIL_*` values in `.env`.

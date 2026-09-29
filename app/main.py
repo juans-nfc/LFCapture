@@ -404,6 +404,110 @@ def api_activity(request: Request, limit: int = 30):
     return {"items": list(reversed(mine))}
 
 
+# ---------- in-Laserfiche flow: Workflow / Business Process calls this, results are written straight onto the entries ----------
+WF_TOKEN = os.environ.get("LF_WORKFLOW_TOKEN", "")
+TAG_PROPOSED = os.environ.get("LF_TAG_PROPOSED", "AI-Proposed")
+TAG_UNSURE = os.environ.get("LF_TAG_UNSURE", "AI-Unsure")
+TAG_FAILED = os.environ.get("LF_TAG_FAILED", "AI-Failed")
+DIRECT_UNSURE_BELOW = float(os.environ.get("DIRECT_UNSURE_BELOW", "0.8"))
+
+
+class LfReadRequest(BaseModel):
+    entry_ids: list[int] = []
+    entry_id: int | None = None          # convenience for Workflow (one token)
+    user: str | None = None              # LF username of the person who started it (Workflow %(Initiator)); optional
+    mode: str = "keep"                   # keep | overwrite (for entries that already have a template)
+    recursive: bool = False              # when an entry is a folder: include subfolders
+
+
+def _wf_client(user: str | None) -> tuple[LaserficheClient, str]:
+    """Client to act as: the named user's stored login if they have one, else the service account."""
+    if user:
+        for cand in (user, user.split("\\")[-1], user.split("@")[0]):
+            if users.get_creds(cand):
+                return users.client_for(cand), cand
+    if _svc is not None:
+        return _svc, "service"
+    raise HTTPException(400, "No usable Laserfiche login: the user has not signed in to LF Capture and no service account is configured")
+
+
+@app.post("/api/lf/read")
+def api_lf_read(req: LfReadRequest, request: Request):
+    auth = request.headers.get("authorization", "")
+    if not WF_TOKEN or auth != f"Bearer {WF_TOKEN}":
+        raise HTTPException(401, "bad or missing LF_WORKFLOW_TOKEN")
+    lf, who = _wf_client(req.user)
+    ids = list(req.entry_ids) + ([req.entry_id] if req.entry_id else [])
+    if not ids:
+        raise HTTPException(400, "entry_id or entry_ids required")
+    # expand folders into their documents
+    docs = []
+    for eid in ids:
+        e = lf.get_entry(eid)
+        if e.get("entryType") == "Folder":
+            docs += [d["id"] for d in lf.list_documents(e.get("fullPath"), req.recursive, only_no_template=False, limit=1000)]
+        else:
+            docs.append(eid)
+    mode = "overwrite" if req.mode == "overwrite" else "keep"
+    n = 0
+    for eid in docs:
+        _bf_queue.put(("direct", eid, who, mode))
+        n += 1
+    _bf_state["queued"] += n
+    return {"queued": n, "acting_as": who, "mode": mode}
+
+
+def _direct_one(entry_id: int, who: str, mode: str) -> None:
+    """Read one existing entry and write the result straight back into Laserfiche, tagged for human review."""
+    lf = _svc if who == "service" else users.client_for(who)
+    entry = lf.get_entry(entry_id)
+    if entry.get("entryType") == "Folder":
+        return
+    pdf = lf.export_pdf(entry_id, entry)
+    existing = lf.entry_fields(entry_id)
+    current_tpl = entry.get("templateName") or None
+    if mode == "overwrite" or not current_tpl:
+        ctx = (f"This document is already in Laserfiche at: {entry.get('fullPath')}\nCurrently filed under template: {current_tpl or 'none'} — may be wrong; choose from the document.\n"
+               f"Existing field values (may be wrong): {json.dumps(existing) if existing else 'none'}")
+        forced = None
+    else:
+        ctx = (f"This document is already in Laserfiche at: {entry.get('fullPath')}\nCurrent template: {current_tpl}\n"
+               f"Existing field values (kept; fill the EMPTY fields): {json.dumps(existing) if existing else 'none'}")
+        forced = current_tpl
+    job_id = _new_job(pdf, f"LF {entry_id}: {entry.get('name')}", ctx, owner=None)
+    try:
+        result = _run_extract(job_id, forced, lf)
+        fields = result["fields"]
+        if mode != "overwrite" and current_tpl:
+            fields = {**fields, **{k: v for k, v in existing.items() if v}}
+        template = result.get("template") or current_tpl
+        if not template:
+            raise RuntimeError("no template could be determined")
+        # respect field lengths so the write cannot fail on that
+        tdef = next((t for t in templates(lf) if t["name"] == template), None)
+        if tdef:
+            for f in tdef["fields"]:
+                if f.get("length") and fields.get(f["name"]):
+                    fields[f["name"]] = [v[: f["length"]] for v in fields[f["name"]]]
+        lf.update_document(entry_id, template, fields, current_tpl)
+        unsure = result["confidence"] < DIRECT_UNSURE_BELOW
+        try:
+            lf.set_tags(entry_id, add=[TAG_PROPOSED] + ([TAG_UNSURE] if unsure else []), remove=[TAG_FAILED] + ([] if unsure else [TAG_UNSURE]))
+        except LaserficheError as e:
+            logging.getLogger("lf-capture").warning("tagging %s failed (do the tags exist in the repository?): %s", entry_id, e)
+        _log_activity(who, kind="lf_direct", source=entry.get("name"), template=template, entry_id=entry_id, folder=entry.get("fullPath"),
+                      confidence=result["confidence"], name=entry.get("name"), notes=result.get("notes", ""))
+    except Exception as e:
+        try:
+            lf.set_tags(entry_id, add=[TAG_FAILED])
+        except Exception:
+            pass
+        _log_activity(who, kind="lf_direct_failed", source=entry.get("name"), entry_id=entry_id, folder=entry.get("fullPath"), error=str(e))
+        raise
+    finally:
+        shutil.rmtree(WORK / job_id, ignore_errors=True)
+
+
 # ---------- backfill: documents already in Laserfiche ----------
 _bf_queue: "queue.Queue[tuple]" = queue.Queue()
 _bf_state = {"queued": 0, "done": 0, "failed": 0, "errors": []}
@@ -451,7 +555,7 @@ def api_backfill_queue(req: QueueRequest, request: Request):
         if eid in _bf_seen:
             continue
         _bf_seen.add(eid)
-        _bf_queue.put((eid, email, mode))
+        _bf_queue.put(("lf", eid, email, mode))
         n += 1
     _bf_state["queued"] += n
     return {"queued": n}
@@ -552,14 +656,17 @@ def _backfill_worker():
             if item[0] == "job":
                 _, job_id, user = item
                 _process_upload(job_id, user)
+            elif item[0] == "direct":
+                _, eid, who, mode = item
+                _direct_one(eid, who, mode)
             else:
-                eid, email, mode = item
+                _, eid, email, mode = item
                 _backfill_one(eid, email, mode)
             _bf_state["done"] += 1
         except Exception as e:
             _bf_state["failed"] += 1
             _bf_state["errors"].append(f"{item[1]}: {e}")
-            if item[0] != "job":
+            if item[0] == "lf":
                 _bf_seen.discard(item[1])
             else:  # leave a reviewable stub so the upload isn't silently lost
                 mp = WORK / item[1] / "meta.json"

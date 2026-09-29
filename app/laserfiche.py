@@ -302,6 +302,16 @@ class LaserficheClient:
         body["fields"] = [f for f in body["fields"] if f["values"]]
         self._req("PUT", f"/Entries/{entry_id}/Fields", json=body)
 
+    def entry_tags(self, entry_id: int) -> list[str]:
+        return [t.get("name") for t in self._req("GET", f"/Entries/{entry_id}/Tags").get("value", []) if t.get("name")]
+
+    def set_tags(self, entry_id: int, add: list[str] = (), remove: list[str] = ()) -> None:
+        """Adjust an entry's tags (v2 PUT replaces the whole set, so read-merge-write). Tags must already exist in the repository."""
+        current = set(self.entry_tags(entry_id))
+        wanted = sorted((current | set(add)) - set(remove))
+        if wanted != sorted(current):
+            self._req("PUT", f"/Entries/{entry_id}/Tags", json={"tags": wanted})
+
     def update_document(self, entry_id: int, template: str, fields: dict[str, list[str]], current_template: str | None) -> None:
         if template != (current_template or ""):
             self.set_template(entry_id, template)
