@@ -184,16 +184,18 @@ def api_queue(request: Request):
         if not d.is_dir() or not m.exists():
             continue
         meta = json.loads(m.read_text())
-        if "template" not in meta and "notes" not in meta:
-            continue  # extraction still running (or crashed mid-way); not reviewable yet
+        reading = "template" not in meta and "notes" not in meta   # extraction still running (or crashed mid-way)
         row = {"id": d.name, "source": meta.get("source"), "template": meta.get("template"), "confidence": meta.get("confidence"),
-               "lf_path": meta.get("lf_path"), "owner": meta.get("owner")}
+               "lf_path": meta.get("lf_path"), "owner": meta.get("owner"), "created": meta.get("created"), "reading": reading}
         if not meta.get("owner"):
             if show_shared:
                 shared.append(row)
         elif meta.get("owner") == user:
             mine.append(row)
-    return {"inbox": pending, "jobs": mine + shared, "mine": len(mine), "shared": len(shared) + len(pending)}
+    ready = [r for r in mine + shared if not r["reading"]]
+    reading = [r for r in mine + shared if r["reading"]]
+    return {"inbox": pending, "jobs": ready, "reading": reading,
+            "mine": sum(1 for r in ready if r["owner"]), "shared": sum(1 for r in ready if not r["owner"]) + len(pending)}
 
 
 @app.post("/api/extract")

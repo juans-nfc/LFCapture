@@ -104,6 +104,22 @@
   #settings .err { color: var(--red); font-size: 15px; min-height: 20px; margin-top: 8px; }
   header .who { color: var(--muted); font-size: 14px; }
 
+  /* queue list (right pane when nothing is open) */
+  .qlist h2 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .qlist .sub { color: var(--muted); margin: 0 0 14px; font-size: 14px; }
+  .qlist h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 16px 0 6px; }
+  .qlist ul { list-style: none; margin: 0; padding: 0; }
+  .qlist li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 9px 10px; border: 1px solid var(--rule); border-radius: 8px; margin-bottom: 6px; cursor: pointer; background: #fff; }
+  .qlist li:hover { border-color: var(--brand); background: var(--brand-soft); }
+  .qlist li.reading { cursor: default; opacity: .7; }
+  .qlist li.reading:hover { border-color: var(--rule); background: #fff; }
+  .qlist .name { font-weight: 600; }
+  .qlist .meta { color: var(--muted); font-size: 13px; grid-column: 1 / -1; }
+  .qlist .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-dark); align-self: start; white-space: nowrap; }
+  .qlist .tag.unsure { background: #fbf6ec; color: var(--amber); }
+  .qlist .tag.reading { background: #eef1f4; color: var(--muted); }
+  .qlist .empty { color: var(--muted); padding: 10px 0; }
+
   /* preferences dialog */
   #prefs { position: fixed; inset: 0; background: rgba(21,75,133,.35); display: flex; align-items: center; justify-content: center; z-index: 20; }
   #prefs .box { background: var(--pane); border-radius: 12px; padding: 22px 26px; width: min(520px, 92vw); box-shadow: 0 12px 32px rgba(0,0,0,.2); max-height: 90vh; overflow: auto; }
@@ -166,6 +182,7 @@
   <h1><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.7l1.8 2h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-11Z" fill="#f6c343"/><path d="M8 11h8M8 14h5" stroke="#154b85" stroke-width="1.6" stroke-linecap="round"/></svg>LF Capture</h1>
   <span class="queue" id="queue">Checking inbox…</span>
   <span class="spacer"></span>
+  <button id="qopen" title="See what's waiting for review">Queue</button>
   <label class="btn">Upload PDF<input id="upload" type="file" accept="application/pdf" hidden></label>
   <button id="bfopen" title="Read documents already in Laserfiche and fill in their metadata">From Laserfiche</button>
   <button id="refresh" class="link" title="Reload templates from Laserfiche">Reload templates</button>
@@ -327,7 +344,7 @@ $('#setform').onsubmit = async e => {
   try {
     await api('api/settings/lf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#lfuser').value.trim(), password: $('#lfpass').value }) });
     try { localStorage.setItem('lfc_last_user', $('#lfuser').value.trim()); } catch {}
-    $('#settings').hidden = true; document.body.classList.remove('signin'); await loadMe(); await loadTemplates(); $('#queue').textContent = ''; setStatus(`Signed in to Laserfiche as ${me.lf_username}`, 'ok'); nextFromQueue().catch(() => {});
+    $('#settings').hidden = true; document.body.classList.remove('signin'); await loadMe(); await loadTemplates(); $('#queue').textContent = ''; setStatus(`Signed in to Laserfiche as ${me.lf_username}`, 'ok'); nextFromQueue().catch(() => {}); startPolling();
   } catch (err) { $('#seterr').textContent = err.message; }
   finally { $('#setsave').disabled = false; }
 };
@@ -339,20 +356,35 @@ async function loadTemplates(refresh = false) {
   templates = await api('api/templates' + (refresh ? '?refresh=1' : ''));
 }
 
+let lastQ = null;
 async function loadQueue() {
-  const q = await api('api/queue');
+  const q = await api('api/queue'); lastQ = q;
   const n = q.inbox.length + q.jobs.length;
-  $('#queue').textContent = !n ? 'Nothing waiting' : (q.shared ? `${q.mine} yours · ${q.shared} shared` : `${q.mine} yours`);
+  const rd = (q.reading || []).length;
+  $('#queue').textContent = (!n ? 'Nothing waiting' : (q.shared ? `${q.mine} yours · ${q.shared} shared` : `${q.mine} yours`)) + (rd ? ` · ${rd} reading…` : '');
+  if (!job) renderQueueList();
   return q;
 }
+function renderQueueList() {
+  const q = lastQ; const f = $('#form'); if (!q) return;
+  const mine = q.jobs.filter(j => j.owner), shared = q.jobs.filter(j => !j.owner);
+  const li = j => `<li data-id="${j.id}"><span class="name">${esc(j.source || '')}</span>
+      <span class="tag ${j.confidence >= (P().unsure_below ?? 0.8) ? '' : 'unsure'}">${esc(j.template || 'no template')}</span>
+      <span class="meta">${j.lf_path ? 'Already in Laserfiche · ' + esc(j.lf_path) : 'Upload'}${j.confidence != null ? ' · ' + Math.round(j.confidence * 100) + '% confident' : ''}</span></li>`;
+  const rd = (q.reading || []).map(j => `<li class="reading"><span class="name">${esc(j.source || '')}</span><span class="tag reading">reading…</span></li>`).join('');
+  const inbox = q.inbox.map(n => `<li data-inbox="${esc(n)}"><span class="name">${esc(n)}</span><span class="tag">drop folder</span><span class="meta">Click to read</span></li>`).join('');
+  f.innerHTML = `<div class="qlist"><h2>Review queue</h2><p class="sub">${q.jobs.length || q.inbox.length || rd ? 'Click a document to open it.' : 'Nothing waiting. Upload a PDF or read documents from Laserfiche.'}</p>
+    ${mine.length ? `<h3>Yours (${mine.length})</h3><ul>${mine.map(li).join('')}</ul>` : ''}
+    ${shared.length || inbox ? `<h3>Shared (${shared.length + q.inbox.length})</h3><ul>${shared.map(li).join('')}${inbox}</ul>` : ''}
+    ${rd ? `<h3>Being read</h3><ul>${rd}</ul>` : ''}</div>`;
+  f.querySelectorAll('li[data-id]').forEach(el => el.onclick = async () => { try { showJob(await api(`api/job/${el.dataset.id}`)); } catch (e) { setStatus(e.message, 'err'); } });
+  f.querySelectorAll('li[data-inbox]').forEach(el => el.onclick = () => { const fd = new FormData(); fd.append('inbox_name', el.dataset.inbox); extract(fd); });
+  $('#save').disabled = true; $('#discard').hidden = true;
+}
 
-async function nextFromQueue() {
+async function nextFromQueue(autoOpen = false) {
   const q = await loadQueue();
-  if (q.jobs.length) return showJob(await api(`api/job/${q.jobs[0].id}`));
-  if (q.inbox.length) {
-    const fd = new FormData(); fd.append('inbox_name', q.inbox[0]);
-    return extract(fd);
-  }
+  if (autoOpen && q.jobs.length) return showJob(await api(`api/job/${q.jobs[0].id}`));
   job = null; render();
 }
 
@@ -378,7 +410,7 @@ function render() {
   $('#empty').hidden = has; $('#pdf').hidden = !has;
   $('#save').disabled = !has; $('#discard').hidden = !has;
   const f = $('#form'); f.innerHTML = '';
-  if (!has) return;
+  if (!has) { renderQueueList(); return; }
 
   job.fields = job.fields || {};
   const t = templates.find(x => x.name === job.template) || null;
@@ -455,10 +487,11 @@ async function save() {
       body: JSON.stringify({ template: t.name, fields, filename: $('#fname').value || job.source, folder: ($('#folder') && $('#folder').value.trim()) || null }) });
     if ($('#folder') && $('#folder').value.trim()) remember('folder', $('#folder').value.trim());
     setStatus(job.lf_path ? `Updated entry ${res.entry_id} (${t.name})` : `Saved as ${t.name} (entry ${res.entry_id})`, 'ok');
-    if ((P().after_save || 'next') === 'stay') { job = null; render(); await loadQueue(); } else await nextFromQueue();
+    if ((P().after_save || 'next') === 'stay') { job = null; render(); await loadQueue(); } else await nextFromQueue(true);
   } catch (e) { setStatus(e.message, 'err'); $('#save').disabled = false; }
 }
 
+$('#qopen').onclick = () => { job = null; $('#pdf').src = 'about:blank'; render(); loadQueue().catch(() => {}); };
 $('#save').onclick = save;
 $('#discard').onclick = async () => { if (confirm('Discard this document? It moves to inbox/_failed.')) { await api(`api/job/${job.id}`, { method: 'DELETE' }); nextFromQueue(); } };
 $('#refresh').onclick = async () => { await loadTemplates(true); setStatus(`${templates.length} templates loaded`, 'ok'); render(); };
@@ -548,13 +581,18 @@ async function pollBf() {
 
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+let pollTimer = null;
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => { if ($('#busy').hidden && document.visibilityState === 'visible') loadQueue().catch(() => {}); }, 5000);
+}
 (async () => {
   await loadMe();
   if (me && !me.has_lf_creds) { openSettings(true); $('#queue').textContent = 'Laserfiche login needed'; return; }
   try { await loadTemplates(); }
   catch (e) { if (!e.message.includes('Laserfiche login')) { setStatus(e.message, 'err'); $('#queue').textContent = 'Laserfiche unreachable'; } return; }
   try { await nextFromQueue(); } catch (e) { setStatus(e.message, 'err'); }
-  setInterval(() => { if (!job && $('#busy').hidden) nextFromQueue().catch(() => {}); else loadQueue().catch(() => {}); }, 15000);
+  startPolling();
 })();
 </script>
 </body>
