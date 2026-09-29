@@ -146,12 +146,18 @@ DEFAULT_PREFS = {
     "scan_recursive": False,
     "unsure_below": 0.8,           # confidence under this shows the "not sure" flag
     "after_save": "next",          # next | stay
+    "split_batches": "ask",        # never | ask | always — detect several documents inside one uploaded PDF and split them
+    "auto_file": False,            # file my uploads automatically when confident (no review)
+    "auto_file_min": 0.9,          # ...at or above this confidence
 }
 
 
 def get_prefs(username: str) -> dict:
     rec = _load().get(_key(username)) or {}
-    return {**DEFAULT_PREFS, **(rec.get("prefs") or {})}
+    p = {**DEFAULT_PREFS, **(rec.get("prefs") or {})}
+    if isinstance(p.get("split_batches"), bool):  # older stored value
+        p["split_batches"] = "always" if p["split_batches"] else "never"
+    return p
 
 
 def set_prefs(username: str, prefs: dict) -> dict:

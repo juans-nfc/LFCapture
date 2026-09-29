@@ -120,6 +120,17 @@
   .qlist .tag.reading { background: #eef1f4; color: var(--muted); }
   .qlist .empty { color: var(--muted); padding: 10px 0; }
 
+  /* drag & drop */
+  body.dragging::after { content: "Drop PDFs to add them to your queue"; position: fixed; inset: 0; background: rgba(27,94,166,.18); border: 4px dashed var(--brand); display: grid; place-content: center; font-size: 26px; font-weight: 600; color: var(--brand-dark); z-index: 50; pointer-events: none; }
+  .qlist li { grid-template-columns: auto 1fr auto; }
+  .qlist li input[type=checkbox] { align-self: start; margin-top: 3px; }
+  .qlist li.reading { grid-template-columns: 1fr auto; }
+  .qlist .bulk { display: flex; gap: 10px; align-items: center; margin: 4px 0 10px; }
+  .qlist .bulk .save { flex: 0 0 auto; padding: 7px 14px; font-size: 14px; }
+  .qlist .bulk .hint { color: var(--muted); font-size: 13px; }
+  .qlist .filed { color: var(--muted); font-size: 13px; padding: 4px 0; }
+  .qlist .filed b { color: var(--ink); font-weight: 600; }
+
   /* preferences dialog */
   #prefs { position: fixed; inset: 0; background: rgba(21,75,133,.35); display: flex; align-items: center; justify-content: center; z-index: 20; }
   #prefs .box { background: var(--pane); border-radius: 12px; padding: 22px 26px; width: min(520px, 92vw); box-shadow: 0 12px 32px rgba(0,0,0,.2); max-height: 90vh; overflow: auto; }
@@ -183,7 +194,7 @@
   <span class="queue" id="queue">Checking inbox…</span>
   <span class="spacer"></span>
   <button id="qopen" title="See what's waiting for review">Queue</button>
-  <label class="btn">Upload PDF<input id="upload" type="file" accept="application/pdf" hidden></label>
+  <label class="btn">Upload PDFs<input id="upload" type="file" accept="application/pdf" multiple hidden></label>
   <button id="bfopen" title="Read documents already in Laserfiche and fill in their metadata">From Laserfiche</button>
   <button id="refresh" class="link" title="Reload templates from Laserfiche">Reload templates</button>
   <span class="who" id="who"></span>
@@ -215,6 +226,15 @@
     <label for="p_after">After saving a document</label>
     <select id="p_after"><option value="next">Go to the next document in my queue</option><option value="stay">Stay on an empty page</option></select>
 
+    <label for="p_split">Uploaded PDFs with several documents scanned together</label>
+    <select id="p_split"><option value="never">Never split — each PDF is one document</option><option value="ask">Ask me each time I upload</option><option value="always">Always look for boundaries and split</option></select>
+
+    <h3>Automatic filing</h3>
+    <label class="check"><input id="p_auto" type="checkbox"> File my uploads automatically, without review, when confident</label>
+    <label for="p_automin">…at or above this confidence</label>
+    <div class="range"><input id="p_automin" type="range" min="0.7" max="1" step="0.05"><output id="p_automin_out">90%</output></div>
+    <p class="fine" style="margin-top:4px">Auto-filed documents go to your working folder and are listed under "Filed automatically" in the queue view. Anything below the bar, or with a missing required field, still waits for you.</p>
+
     <h3>My queue</h3>
     <label class="check"><input id="p_shared" type="checkbox"> Show shared documents (drop folder and mailbox) alongside my own</label>
     <label for="p_unsure">Flag a document as "not sure" when confidence is below</label>
@@ -239,7 +259,7 @@
       <div class="crumb"><button class="btn" id="brup" title="Up one level">↑</button><code id="brpath">\</code></div>
       <div class="find"><input id="brfind" placeholder="Type to find a folder here, e.g. 80552 — Enter opens the first match"></div>
       <ul id="brlist"></ul>
-      <div class="actions"><span id="brinfo"></span><span style="flex:1"></span><button class="btn" id="brcancel">Cancel</button><button class="save" id="bruse" style="flex:0 0 auto">Use this folder</button></div>
+      <div class="actions"><span id="brinfo"></span><span style="flex:1"></span><button class="btn" id="brcancel">Cancel</button><button class="btn" id="brreadall" hidden>Read all here</button><button class="save" id="bruse" style="flex:0 0 auto">Use this folder</button></div>
     </div>
 
   <section id="bf" hidden>
@@ -264,8 +284,8 @@
   <section id="viewer">
     <div class="empty" id="empty">
       <strong>Nothing to review</strong>
-      Drop PDFs in the inbox folder or upload one here.
-      <label class="btn">Choose a PDF<input id="upload2" type="file" accept="application/pdf"></label>
+      Drag PDFs anywhere on this page, or choose them here.
+      <label class="btn">Choose PDFs<input id="upload2" type="file" accept="application/pdf" multiple></label>
     </div>
     <iframe id="pdf" hidden></iframe>
     <div class="busy" id="busy" hidden>Reading document…</div>
@@ -308,12 +328,15 @@ function openPrefs() {
   $('#p_folder').value = p.working_folder || ''; $('#p_after').value = p.after_save || 'next';
   $('#p_shared').checked = p.show_shared !== false; $('#p_unsure').value = p.unsure_below ?? 0.8; $('#p_unsure_out').textContent = Math.round(($('#p_unsure').value) * 100) + '%';
   $('#p_scan_nt').checked = p.scan_only_no_template !== false; $('#p_scan_rec').checked = !!p.scan_recursive;
+  $('#p_split').value = p.split_batches || 'ask'; $('#p_auto').checked = !!p.auto_file;
+  $('#p_automin').value = p.auto_file_min ?? 0.9; $('#p_automin_out').textContent = Math.round($('#p_automin').value * 100) + '%';
   $('#p_user').textContent = me && me.lf_username ? `Signed in as ${me.lf_username}` : '';
   $('#preferr').textContent = ''; $('#prefs').hidden = false;
 }
 $('#prefopen').onclick = openPrefs;
 $('#prefcancel').onclick = () => { $('#prefs').hidden = true; };
 $('#p_unsure').oninput = () => { $('#p_unsure_out').textContent = Math.round($('#p_unsure').value * 100) + '%'; };
+$('#p_automin').oninput = () => { $('#p_automin_out').textContent = Math.round($('#p_automin').value * 100) + '%'; };
 $('#p_browse').onclick = () => openBrowser($('#p_folder').value, p => { $('#p_folder').value = p; });
 $('#p_relogin').onclick = () => { $('#prefs').hidden = true; openSettings(false); };
 $('#prefform').onsubmit = async e => {
@@ -321,7 +344,8 @@ $('#prefform').onsubmit = async e => {
   try {
     const prefs = await api('api/settings/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       working_folder: $('#p_folder').value.trim(), after_save: $('#p_after').value, show_shared: $('#p_shared').checked,
-      unsure_below: parseFloat($('#p_unsure').value), scan_only_no_template: $('#p_scan_nt').checked, scan_recursive: $('#p_scan_rec').checked }) });
+      unsure_below: parseFloat($('#p_unsure').value), scan_only_no_template: $('#p_scan_nt').checked, scan_recursive: $('#p_scan_rec').checked,
+      split_batches: $('#p_split').value, auto_file: $('#p_auto').checked, auto_file_min: parseFloat($('#p_automin').value) }) });
     me.prefs = prefs; $('#prefs').hidden = true; setStatus('Settings saved', 'ok');
     $('#bffilter').value = prefs.scan_only_no_template ? '1' : '0'; $('#bfrec').checked = !!prefs.scan_recursive;
     if (job) render(); else nextFromQueue().catch(() => {}); loadQueue().catch(() => {});
@@ -368,15 +392,32 @@ async function loadQueue() {
 function renderQueueList() {
   const q = lastQ; const f = $('#form'); if (!q) return;
   const mine = q.jobs.filter(j => j.owner), shared = q.jobs.filter(j => !j.owner);
-  const li = j => `<li data-id="${j.id}"><span class="name">${esc(j.source || '')}</span>
+  const li = j => `<li data-id="${j.id}"><input type="checkbox" class="qck" data-id="${j.id}" ${j.template ? '' : 'disabled'} onclick="event.stopPropagation()"><span class="name">${esc(j.source || '')}</span>
       <span class="tag ${j.confidence >= (P().unsure_below ?? 0.8) ? '' : 'unsure'}">${esc(j.template || 'no template')}</span>
       <span class="meta">${j.lf_path ? 'Already in Laserfiche · ' + esc(j.lf_path) : 'Upload'}${j.confidence != null ? ' · ' + Math.round(j.confidence * 100) + '% confident' : ''}</span></li>`;
   const rd = (q.reading || []).map(j => `<li class="reading"><span class="name">${esc(j.source || '')}</span><span class="tag reading">reading…</span></li>`).join('');
   const inbox = q.inbox.map(n => `<li data-inbox="${esc(n)}"><span class="name">${esc(n)}</span><span class="tag">drop folder</span><span class="meta">Click to read</span></li>`).join('');
   f.innerHTML = `<div class="qlist"><h2>Review queue</h2><p class="sub">${q.jobs.length || q.inbox.length || rd ? 'Click a document to open it.' : 'Nothing waiting. Upload a PDF or read documents from Laserfiche.'}</p>
-    ${mine.length ? `<h3>Yours (${mine.length})</h3><ul>${mine.map(li).join('')}</ul>` : ''}
+    ${mine.length ? `<h3>Yours (${mine.length})</h3><div class="bulk"><button class="save" id="qsaveall" type="button">Save selected as proposed</button><label class="hint"><input type="checkbox" id="qall"> select all</label><span class="hint" id="qhint"></span></div><ul>${mine.map(li).join('')}</ul>` : ''}
     ${shared.length || inbox ? `<h3>Shared (${shared.length + q.inbox.length})</h3><ul>${shared.map(li).join('')}${inbox}</ul>` : ''}
-    ${rd ? `<h3>Being read</h3><ul>${rd}</ul>` : ''}</div>`;
+    ${rd ? `<h3>Being read</h3><ul>${rd}</ul>` : ''}
+    <div id="qfiled"></div></div>`;
+  const ck = () => [...f.querySelectorAll('.qck:checked')];
+  const upd = () => { const n = ck().length; const b = $('#qsaveall'); if (b) { b.disabled = !n; b.textContent = n ? `Save ${n} selected as proposed` : 'Save selected as proposed'; } };
+  f.querySelectorAll('.qck').forEach(c => c.onchange = upd); upd();
+  if ($('#qall')) $('#qall').onchange = e => { f.querySelectorAll('.qck:not(:disabled)').forEach(c => c.checked = e.target.checked); upd(); };
+  if ($('#qsaveall')) $('#qsaveall').onclick = async () => {
+    const ids = ck().map(c => c.dataset.id); if (!ids.length) return;
+    if (!confirm(`Save ${ids.length} document${ids.length === 1 ? '' : 's'} to Laserfiche exactly as proposed (template, fields, file name), without opening them?`)) return;
+    $('#qsaveall').disabled = true; $('#qhint').textContent = 'Saving…';
+    try { const r = await api('api/save_many', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+      const bad = r.results.filter(x => !x.ok);
+      setStatus(`${r.saved} saved${bad.length ? `; ${bad.length} need attention: ` + bad.map(x => `${x.source || x.id} — ${x.error}`).join('; ') : ''}`, bad.length ? 'err' : 'ok');
+    } catch (e) { setStatus(e.message, 'err'); }
+    loadQueue().catch(() => {});
+  };
+  api('api/activity?limit=8').then(a => { const el = $('#qfiled'); if (!el || !a.items.length) return;
+    el.innerHTML = `<h3>Filed automatically (recent)</h3>` + a.items.map(i => `<div class="filed"><b>${esc(i.name || i.source || '')}</b> · ${esc(i.template || '')} · ${Math.round((i.confidence || 0) * 100)}% · entry ${i.entry_id}</div>`).join(''); }).catch(() => {});
   f.querySelectorAll('li[data-id]').forEach(el => el.onclick = async () => { try { showJob(await api(`api/job/${el.dataset.id}`)); } catch (e) { setStatus(e.message, 'err'); } });
   f.querySelectorAll('li[data-inbox]').forEach(el => el.onclick = () => { const fd = new FormData(); fd.append('inbox_name', el.dataset.inbox); extract(fd); });
   $('#save').disabled = true; $('#discard').hidden = true;
@@ -495,7 +536,28 @@ $('#qopen').onclick = () => { job = null; $('#pdf').src = 'about:blank'; render(
 $('#save').onclick = save;
 $('#discard').onclick = async () => { if (confirm('Discard this document? It moves to inbox/_failed.')) { await api(`api/job/${job.id}`, { method: 'DELETE' }); nextFromQueue(); } };
 $('#refresh').onclick = async () => { await loadTemplates(true); setStatus(`${templates.length} templates loaded`, 'ok'); render(); };
-for (const id of ['#upload', '#upload2']) $(id).onchange = e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('file', f); extract(fd); e.target.value = ''; };
+async function uploadMany(files) {
+  const pdfs = [...files].filter(f => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+  if (!pdfs.length) return setStatus('Only PDF files can be uploaded', 'err');
+  const fd = new FormData(); pdfs.forEach(f => fd.append('files', f));
+  const mode = P().split_batches || 'ask';
+  let split = mode === 'always';
+  if (mode === 'ask') split = confirm(`Do any of these ${pdfs.length === 1 ? 'PDFs contain' : 'PDFs contain'} several documents scanned together?\n\nOK = look for boundaries and split them into separate documents.\nCancel = keep each PDF as one document.`);
+  fd.append('split', split ? '1' : '0');
+  setStatus(`Uploading ${pdfs.length} file${pdfs.length === 1 ? '' : 's'}…`);
+  try {
+    const r = await api('api/upload', { method: 'POST', body: fd });
+    setStatus(`${r.queued} added to your queue — reading in the background${r.skipped.length ? ` (skipped: ${r.skipped.join(', ')})` : ''}`, 'ok');
+    if (!job) { job = null; render(); }
+    loadQueue().catch(() => {});
+  } catch (e) { setStatus(e.message, 'err'); }
+}
+for (const id of ['#upload', '#upload2']) $(id).onchange = e => { uploadMany(e.target.files); e.target.value = ''; };
+let dragDepth = 0;
+document.addEventListener('dragenter', e => { if ([...e.dataTransfer.types].includes('Files')) { dragDepth++; document.body.classList.add('dragging'); } });
+document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging'); if (e.dataTransfer.files.length) uploadMany(e.dataTransfer.files); });
 document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && job) save(); });
 // ---- folder browser ----
 let brCur = '\\', brFolders = [], brDocs = 0;
@@ -527,13 +589,30 @@ let brOnPick = null;
 const uKey = k => `lfc_${k}_${(me && me.lf_username || 'anon').toLowerCase()}`;   // remembered per user, in this browser
 const remember = (k, v) => { try { localStorage.setItem(uKey(k), v); } catch {} };
 const recall = k => { try { return localStorage.getItem(uKey(k)) || ''; } catch { return ''; } };
-function openBrowser(startPath, onPick) {
-  brOnPick = onPick; $('#browse').hidden = false;
+let brReadAll = null;
+function openBrowser(startPath, onPick, readAll = null) {
+  brOnPick = onPick; brReadAll = readAll; $('#browse').hidden = false; $('#brreadall').hidden = !readAll;
   // start where this user last browsed; first time ever, the repository root
   brLoad(recall('browsed') || P().working_folder || '\\');
 }
 function lastFolder() { return P().working_folder || recall('folder') || (me && me.inbox_path) || ''; }
-$('#bfbrowse').onclick = () => openBrowser($('#bffolder').value, p => { $('#bffolder').value = p; $('#bfscan').click(); });
+$('#bfbrowse').onclick = () => openBrowser($('#bffolder').value, p => { $('#bffolder').value = p; $('#bfscan').click(); }, p => { $('#bffolder').value = p; readAllIn(p); });
+$('#brreadall').onclick = () => { $('#browse').hidden = true; if (brReadAll) brReadAll(brCur); };
+async function readAllIn(folder) {
+  // scan with the panel's current filter/mode, then queue everything found — one click
+  $('#bfinfo').textContent = 'Scanning…'; $('#bfqueue').disabled = true; $('#bftable').innerHTML = '';
+  try {
+    const r = await api('api/backfill/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder, recursive: $('#bfrec').checked, only_no_template: $('#bffilter').value === '1' }) });
+    const ids = r.documents.filter(d => !d.queued).map(d => d.id);
+    if (!ids.length) { $('#bfinfo').textContent = 'No matching documents in that folder.'; return; }
+    const mode = $('#bffilter').value === '1' ? 'keep' : $('#bfmode').value;
+    if (!confirm(`Read all ${ids.length} document${ids.length === 1 ? '' : 's'} in ${folder}${$('#bfrec').checked ? ' (and subfolders)' : ''}?` + (mode === 'overwrite' ? '\n\nTemplated documents will be re-read from scratch.' : ''))) { $('#bfscan').click(); return; }
+    remember('scan', folder);
+    const q = await api('api/backfill/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_ids: ids, mode }) });
+    $('#bf').hidden = true; job = null; render(); setStatus(`${q.queued} document${q.queued === 1 ? '' : 's'} being read — they appear in your queue as they finish.`, 'ok'); loadQueue().catch(() => {});
+  } catch (e) { $('#bfinfo').textContent = e.message; }
+}
 const syncMode = () => { $('#bfmodewrap').hidden = $('#bffilter').value === '1'; };
 $('#bffilter').addEventListener('change', syncMode);
 $('#bfmode').addEventListener('change', () => remember('bfmode', $('#bfmode').value));

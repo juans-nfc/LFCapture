@@ -136,6 +136,9 @@ class PrefsRequest(BaseModel):
     scan_recursive: bool | None = None
     unsure_below: float | None = None
     after_save: str | None = None
+    split_batches: str | None = None
+    auto_file: bool | None = None
+    auto_file_min: float | None = None
 
 
 @app.put("/api/settings/prefs")
@@ -148,10 +151,13 @@ def api_set_prefs(req: PrefsRequest, request: Request, lf: LaserficheClient = De
             folder_entry_id(lf, data["working_folder"])   # must exist and be visible to this user
         except LaserficheError:
             raise HTTPException(400, f"Folder not found in Laserfiche: {data['working_folder']}")
-    if "unsure_below" in data:
-        data["unsure_below"] = min(1.0, max(0.0, float(data["unsure_below"])))
+    for k in ("unsure_below", "auto_file_min"):
+        if k in data:
+            data[k] = min(1.0, max(0.0, float(data[k])))
     if "after_save" in data and data["after_save"] not in ("next", "stay"):
         raise HTTPException(400, "after_save must be next or stay")
+    if "split_batches" in data and data["split_batches"] not in ("never", "ask", "always"):
+        raise HTTPException(400, "split_batches must be never, ask or always")
     return users.set_prefs(u, data)
 
 
@@ -227,6 +233,53 @@ async def api_extract(request: Request, file: UploadFile | None = File(None), in
     if template:
         return result
     return _maybe_auto_save(job_id, result, name, lf)
+
+
+@app.post("/api/upload")
+async def api_upload(request: Request, files: list[UploadFile] = File(...), split: str = Form("0"), lf: LaserficheClient = Depends(users.lf_for)):
+    """Many PDFs at once. Each becomes a job read in the background; split=1 also splits scanned batches into separate documents."""
+    owner = users.require_user(request)
+    ids, skipped = [], []
+    for f in files:
+        data = await f.read()
+        if not data.startswith(b"%PDF"):
+            skipped.append(f.filename)
+            continue
+        job_id = _new_job(data, f.filename or "upload.pdf", owner=owner)
+        if split == "1":
+            mp = WORK / job_id / "meta.json"
+            mp.write_text(json.dumps({**json.loads(mp.read_text()), "split": True}))
+        ids.append(job_id)
+        _bf_queue.put(("job", job_id, owner))
+    _bf_state["queued"] += len(ids)
+    return {"queued": len(ids), "ids": ids, "skipped": skipped}
+
+
+class SaveManyRequest(BaseModel):
+    ids: list[str]
+    folder: str | None = None
+
+
+@app.post("/api/save_many")
+def api_save_many(req: SaveManyRequest, request: Request, lf: LaserficheClient = Depends(users.lf_for)):
+    """Save several queued jobs as proposed (template, fields, suggested name). Returns per-job results."""
+    user = users.require_user(request)
+    out = []
+    for job_id in req.ids:
+        try:
+            d = _job_dir(job_id, user)
+            meta = json.loads((d / "meta.json").read_text())
+            if not meta.get("template"):
+                raise HTTPException(400, "no template chosen")
+            name = meta.get("suggested_filename") or str(meta.get("source", "document")).replace(".pdf", "")
+            folder = req.folder or (users.get_prefs(user)["working_folder"] or None)
+            res = _save(job_id, meta["template"], meta.get("fields", {}), name, lf, folder)
+            out.append({"id": job_id, "ok": True, "entry_id": res["entry_id"], "source": meta.get("source")})
+        except HTTPException as e:
+            out.append({"id": job_id, "ok": False, "error": e.detail})
+        except LaserficheError as e:
+            out.append({"id": job_id, "ok": False, "error": str(e)})
+    return {"results": out, "saved": sum(1 for r in out if r["ok"]), "failed": sum(1 for r in out if not r["ok"])}
 
 
 @app.post("/api/reextract/{job_id}")
@@ -331,8 +384,28 @@ def _from_mailbox(name: str, pdf: bytes, context: str) -> None:
                                  "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}))
 
 
+# ---------- activity log: things filed without review ----------
+ACTIVITY = WORK / "activity.jsonl"
+
+
+def _log_activity(user: str, **row) -> None:
+    with _lock:
+        with ACTIVITY.open("a") as f:
+            f.write(json.dumps({"user": user, "at": time.time(), **row}) + "\n")
+
+
+@app.get("/api/activity")
+def api_activity(request: Request, limit: int = 30):
+    user = users.require_user(request)
+    if not ACTIVITY.exists():
+        return {"items": []}
+    rows = [json.loads(l) for l in ACTIVITY.read_text().splitlines() if l.strip()]
+    mine = [r for r in rows if r.get("user") == user][-limit:]
+    return {"items": list(reversed(mine))}
+
+
 # ---------- backfill: documents already in Laserfiche ----------
-_bf_queue: "queue.Queue[tuple[int, str, str]]" = queue.Queue()
+_bf_queue: "queue.Queue[tuple]" = queue.Queue()
 _bf_state = {"queued": 0, "done": 0, "failed": 0, "errors": []}
 _bf_seen: set[int] = set()
 
@@ -422,16 +495,76 @@ def _backfill_one(entry_id: int, email: str, mode: str = "keep") -> None:
                                  "confidence": 0, "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}))
 
 
+def _pdf_page_count(pdf: bytes) -> int:
+    try:
+        import pymupdf
+        return len(pymupdf.open(stream=pdf, filetype="pdf"))
+    except Exception:
+        return 1
+
+
+def _split_pdf(pdf: bytes, first: int, last: int) -> bytes:
+    import pymupdf
+    src = pymupdf.open(stream=pdf, filetype="pdf")
+    dst = pymupdf.open()
+    dst.insert_pdf(src, from_page=first - 1, to_page=last - 1)
+    return dst.tobytes()
+
+
+def _process_upload(job_id: str, user: str) -> None:
+    """Background read of an uploaded job: split scanned batches, extract, auto-file if the user wants it."""
+    lf = users.client_for(user)
+    prefs = users.get_prefs(user)
+    d = WORK / job_id
+    meta = json.loads((d / "meta.json").read_text())
+    pdf = (d / "doc.pdf").read_bytes()
+    pages = _pdf_page_count(pdf)
+    if meta.get("split") and pages > 1 and not meta.get("split_from"):
+        segs = extractor.detect_segments(pdf, pages, templates(lf))
+        if len(segs) > 1:
+            base = str(meta.get("source", "upload.pdf")).replace(".pdf", "")
+            for i, sg in enumerate(segs, 1):
+                part = _split_pdf(pdf, sg["first_page"], sg["last_page"])
+                rng = f"p{sg['first_page']}" + (f"-{sg['last_page']}" if sg["last_page"] != sg["first_page"] else "")
+                child = _new_job(part, f"{base} [{rng}]", context=f"Split from a scanned batch '{base}' ({pages} pages); this part: {sg.get('what', '')}", owner=user)
+                cm = WORK / child / "meta.json"
+                cm.write_text(json.dumps({**json.loads(cm.read_text()), "split_from": job_id, "part": i, "parts": len(segs)}))
+                _bf_queue.put(("job", child, user))
+            shutil.rmtree(d, ignore_errors=True)
+            return
+    result = _run_extract(job_id, None, lf)
+    if prefs.get("auto_file") and result["confidence"] >= float(prefs.get("auto_file_min", 0.9)) and result.get("template"):
+        try:
+            name = result.get("suggested_filename") or str(meta.get("source", "document")).replace(".pdf", "")
+            saved = _save(job_id, result["template"], result["fields"], name, lf, prefs.get("working_folder") or None)
+            _log_activity(user, kind="auto_filed", source=meta.get("source"), template=result["template"], entry_id=saved["entry_id"],
+                          folder=prefs.get("working_folder") or os.environ.get("LF_INBOX_PATH"), confidence=result["confidence"], name=name)
+        except Exception as e:  # leave it in the queue with the reason
+            mp = WORK / job_id / "meta.json"
+            if mp.exists():
+                mm = json.loads(mp.read_text()); mm["notes"] = f"Not auto-filed: {getattr(e, 'detail', e)}. " + (mm.get("notes") or ""); mp.write_text(json.dumps(mm))
+
+
 def _backfill_worker():
     while True:
-        eid, email, mode = _bf_queue.get()
+        item = _bf_queue.get()
         try:
-            _backfill_one(eid, email, mode)
+            if item[0] == "job":
+                _, job_id, user = item
+                _process_upload(job_id, user)
+            else:
+                eid, email, mode = item
+                _backfill_one(eid, email, mode)
             _bf_state["done"] += 1
         except Exception as e:
             _bf_state["failed"] += 1
-            _bf_state["errors"].append(f"{eid}: {e}")
-            _bf_seen.discard(eid)
+            _bf_state["errors"].append(f"{item[1]}: {e}")
+            if item[0] != "job":
+                _bf_seen.discard(item[1])
+            else:  # leave a reviewable stub so the upload isn't silently lost
+                mp = WORK / item[1] / "meta.json"
+                if mp.exists():
+                    mm = json.loads(mp.read_text()); mm.update({"template": None, "fields": {}, "confidence": 0, "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}); mp.write_text(json.dumps(mm))
         finally:
             _bf_queue.task_done()
 
@@ -455,7 +588,7 @@ def _start_mail():
         mailbox.start_if_configured(_from_mailbox)
     elif os.environ.get("MAIL_MAILBOX"):
         logging.getLogger("lf-capture").warning("MAIL_MAILBOX is set but LF_USERNAME/LF_PASSWORD (service account) is not; mailbox capture disabled")
-    for i in range(int(os.environ.get("BACKFILL_WORKERS", "2"))):
+    for i in range(int(os.environ.get("BACKFILL_WORKERS", "3"))):
         threading.Thread(target=_backfill_worker, daemon=True, name=f"backfill-{i}").start()
 
 
