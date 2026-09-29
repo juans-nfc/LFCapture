@@ -415,6 +415,7 @@ DIRECT_UNSURE_BELOW = float(os.environ.get("DIRECT_UNSURE_BELOW", "0.8"))
 class LfReadRequest(BaseModel):
     entry_ids: list[int] = []
     entry_id: int | None = None          # convenience for Workflow (one token)
+    token: str | None = None             # alternative to the Authorization header (Workflow can't always set headers)
     user: str | None = None              # LF username of the person who started it (Workflow %(Initiator)); optional
     mode: str = "keep"                   # keep | overwrite (for entries that already have a template)
     recursive: bool = False              # when an entry is a folder: include subfolders
@@ -431,10 +432,25 @@ def _wf_client(user: str | None) -> tuple[LaserficheClient, str]:
     raise HTTPException(400, "No usable Laserfiche login: the user has not signed in to LF Capture and no service account is configured")
 
 
+def _lenient_json(raw: bytes) -> dict:
+    """Workflow tokens like %(Initiator) expand to 'domain\\user' unescaped; fix stray backslashes and parse."""
+    import re
+    text = raw.decode("utf-8", "replace")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", text)
+        return json.loads(fixed)
+
+
 @app.post("/api/lf/read")
-def api_lf_read(req: LfReadRequest, request: Request):
+async def api_lf_read(request: Request):
+    try:
+        req = LfReadRequest(**_lenient_json(await request.body()))
+    except Exception as e:
+        raise HTTPException(422, f"Could not read request body: {e}")
     auth = request.headers.get("authorization", "")
-    if not WF_TOKEN or auth != f"Bearer {WF_TOKEN}":
+    if not WF_TOKEN or (auth != f"Bearer {WF_TOKEN}" and (req.token or "") != WF_TOKEN):
         raise HTTPException(401, "bad or missing LF_WORKFLOW_TOKEN")
     lf, who = _wf_client(req.user)
     ids = list(req.entry_ids) + ([req.entry_id] if req.entry_id else [])
