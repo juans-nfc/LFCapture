@@ -80,7 +80,7 @@
   .busy { position: absolute; inset: 0; background: rgba(242,244,241,.85); display: grid; place-content: center; color: var(--muted); font-size: 18px; }
 
   /* settings dialog */
-  #settings { position: fixed; inset: 0; background: rgba(21,75,133,.35); display: grid; place-content: center; z-index: 20; }
+  #settings { position: fixed; inset: 0; background: rgba(21,75,133,.35); display: flex; align-items: center; justify-content: center; z-index: 20; }
   #settings .box { background: var(--pane); border-radius: 12px; padding: 22px 26px; width: min(440px, 92vw); box-shadow: 0 12px 32px rgba(0,0,0,.2); }
   #settings h2 { margin: 0 0 4px; font-size: 19px; font-weight: 600; }
   #settings p { margin: 0 0 14px; color: var(--muted); font-size: 15px; }
@@ -104,11 +104,34 @@
   #settings .err { color: var(--red); font-size: 15px; min-height: 20px; margin-top: 8px; }
   header .who { color: var(--muted); font-size: 14px; }
 
+  /* preferences dialog */
+  #prefs { position: fixed; inset: 0; background: rgba(21,75,133,.35); display: flex; align-items: center; justify-content: center; z-index: 20; }
+  #prefs .box { background: var(--pane); border-radius: 12px; padding: 22px 26px; width: min(520px, 92vw); box-shadow: 0 12px 32px rgba(0,0,0,.2); max-height: 90vh; overflow: auto; }
+  #prefs h2 { margin: 0 0 14px; font-size: 19px; font-weight: 600; }
+  #prefs h3 { margin: 18px 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: .02em; }
+  #prefs label { display: block; font-size: 14px; color: var(--muted); margin: 8px 0 4px; }
+  #prefs label.check { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 15px; margin: 8px 0; cursor: pointer; }
+  #prefs input[type=text], #prefs select { font: inherit; width: 100%; border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px; background: #fff; }
+  #prefs input:focus, #prefs select:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(27,94,166,.15); }
+  #prefs .withbtn { display: flex; gap: 8px; }
+  #prefs .withbtn input { flex: 1; }
+  #prefs .range { display: flex; align-items: center; gap: 12px; }
+  #prefs .range input { flex: 1; }
+  #prefs .range output { min-width: 3.5em; text-align: right; font-weight: 600; }
+  #prefs .actions { display: flex; gap: 10px; align-items: center; margin-top: 20px; }
+  #prefs .actions .save { flex: 0 0 auto; padding: 9px 22px; }
+  #prefs .err { color: var(--red); font-size: 14px; min-height: 20px; margin-top: 6px; }
+  #prefs .account { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+
   /* backfill panel */
   #bf { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--pane); display: flex; flex-direction: column; z-index: 5; }
   #bf .head { display: flex; gap: 10px; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
   #bf .head input[type=text] { font: inherit; flex: 1; min-width: 260px; border: 1px solid var(--rule); border-radius: 8px; padding: 7px 10px; }
   #bf .head select { font: inherit; border: 1px solid var(--rule); border-radius: 8px; padding: 6px 8px; background: #fff; }
+  #bf .head #bfmode { border-color: #d9a441; background: #fff9ec; }
+  .was { display: block; font-size: 13px; color: var(--amber); margin-top: 3px; }
+  .was b { font-weight: 600; }
+  .tplchange { border-left: 3px solid var(--amber); padding: 6px 10px; margin: 0 0 12px; background: #fbf6ec; font-size: 15px; }
   #bf .head label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
   #bf .list { flex: 1; overflow: auto; padding: 0 18px; }
   #bf table { width: 100%; border-collapse: collapse; font-size: 15px; }
@@ -147,7 +170,7 @@
   <button id="bfopen" title="Read documents already in Laserfiche and fill in their metadata">From Laserfiche</button>
   <button id="refresh" class="link" title="Reload templates from Laserfiche">Reload templates</button>
   <span class="who" id="who"></span>
-  <button id="setopen" class="link" title="Your Laserfiche login">⚙ Settings</button>
+  <button id="prefopen" class="link" title="Your settings" hidden>⚙ Settings</button>
   <button id="signout" class="link" hidden>Sign out</button>
 </header>
 
@@ -161,10 +184,37 @@
     <div class="actions">
       <button class="save" id="setsave" type="submit">Sign in</button>
       <button class="btn" id="setcancel" type="button">Cancel</button>
-      <span style="flex:1"></span>
-      <button class="btn" id="setforget" type="button" hidden>Sign out</button>
     </div>
     <p class="fine">Documents are read and saved with your own Laserfiche account, so you only see what you have rights to and the audit trail shows your name. Your password is stored encrypted on the tools server; the sign-in lasts 30 days in this browser.</p>
+  </form>
+</div>
+<div id="prefs" hidden>
+  <form class="box" id="prefform">
+    <h2>Settings</h2>
+
+    <h3>Filing</h3>
+    <label for="p_folder">My working folder — where uploads are saved by default and where Browse starts</label>
+    <div class="withbtn"><input id="p_folder" type="text" placeholder="e.g. \Sales\Orders  (blank = \_incoming\Capture)"><button class="btn" id="p_browse" type="button">Browse…</button></div>
+    <label for="p_after">After saving a document</label>
+    <select id="p_after"><option value="next">Go to the next document in my queue</option><option value="stay">Stay on an empty page</option></select>
+
+    <h3>My queue</h3>
+    <label class="check"><input id="p_shared" type="checkbox"> Show shared documents (drop folder and mailbox) alongside my own</label>
+    <label for="p_unsure">Flag a document as "not sure" when confidence is below</label>
+    <div class="range"><input id="p_unsure" type="range" min="0.5" max="1" step="0.05"><output id="p_unsure_out">80%</output></div>
+
+    <h3>From Laserfiche</h3>
+    <label class="check"><input id="p_scan_nt" type="checkbox"> Only list documents with no template</label>
+    <label class="check"><input id="p_scan_rec" type="checkbox"> Include subfolders</label>
+
+    <h3>Laserfiche account</h3>
+    <div class="account"><span id="p_user"></span><span style="flex:1"></span><button class="btn" id="p_relogin" type="button">Change login…</button></div>
+
+    <div class="err" id="preferr"></div>
+    <div class="actions">
+      <button class="save" id="prefsave" type="submit">Save</button>
+      <button class="btn" id="prefcancel" type="button">Cancel</button>
+    </div>
   </form>
 </div>
 <main style="position:relative">
@@ -182,6 +232,7 @@
       <button class="btn" id="bfbrowse" title="Browse Laserfiche folders">Browse…</button>
       <label><input id="bfrec" type="checkbox"> include subfolders</label>
       <label><select id="bffilter"><option value="1">documents with no template</option><option value="0">all documents</option></select></label>
+      <label id="bfmodewrap" title="What to do with documents that already have a template"><select id="bfmode"><option value="keep">keep template, fill in blanks</option><option value="overwrite">re-read from scratch (may change template &amp; values)</option></select></label>
       <button class="btn" id="bfscan">Scan</button>
       <button class="btn" id="bfclose">Close</button>
     </div>
@@ -228,19 +279,47 @@ async function api(path, opts = {}) {
   return r.json();
 }
 async function loadMe() {
-  try { me = await api('api/me'); $('#who').textContent = me.lf_username || ''; $('#signout').hidden = !me.lf_username; } catch { me = null; }
+  try { me = await api('api/me'); $('#who').textContent = me.lf_username || ''; $('#signout').hidden = !me.lf_username; $('#prefopen').hidden = !me.lf_username;
+    if (me.prefs) { $('#bffilter').value = me.prefs.scan_only_no_template ? '1' : '0'; $('#bfrec').checked = !!me.prefs.scan_recursive; } } catch { me = null; }
   return me;
 }
+// ---- preferences ----
+const P = () => (me && me.prefs) || {};
+const defaultFolder = () => (P().working_folder || (me && me.inbox_path) || '');
+function openPrefs() {
+  const p = P();
+  $('#p_folder').value = p.working_folder || ''; $('#p_after').value = p.after_save || 'next';
+  $('#p_shared').checked = p.show_shared !== false; $('#p_unsure').value = p.unsure_below ?? 0.8; $('#p_unsure_out').textContent = Math.round(($('#p_unsure').value) * 100) + '%';
+  $('#p_scan_nt').checked = p.scan_only_no_template !== false; $('#p_scan_rec').checked = !!p.scan_recursive;
+  $('#p_user').textContent = me && me.lf_username ? `Signed in as ${me.lf_username}` : '';
+  $('#preferr').textContent = ''; $('#prefs').hidden = false;
+}
+$('#prefopen').onclick = openPrefs;
+$('#prefcancel').onclick = () => { $('#prefs').hidden = true; };
+$('#p_unsure').oninput = () => { $('#p_unsure_out').textContent = Math.round($('#p_unsure').value * 100) + '%'; };
+$('#p_browse').onclick = () => openBrowser($('#p_folder').value, p => { $('#p_folder').value = p; });
+$('#p_relogin').onclick = () => { $('#prefs').hidden = true; openSettings(false); };
+$('#prefform').onsubmit = async e => {
+  e.preventDefault(); $('#preferr').textContent = 'Saving…';
+  try {
+    const prefs = await api('api/settings/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      working_folder: $('#p_folder').value.trim(), after_save: $('#p_after').value, show_shared: $('#p_shared').checked,
+      unsure_below: parseFloat($('#p_unsure').value), scan_only_no_template: $('#p_scan_nt').checked, scan_recursive: $('#p_scan_rec').checked }) });
+    me.prefs = prefs; $('#prefs').hidden = true; setStatus('Settings saved', 'ok');
+    $('#bffilter').value = prefs.scan_only_no_template ? '1' : '0'; $('#bfrec').checked = !!prefs.scan_recursive;
+    if (job) render(); else nextFromQueue().catch(() => {}); loadQueue().catch(() => {});
+  } catch (err) { $('#preferr').textContent = err.message; }
+};
+
 const lastUser = () => { try { return localStorage.getItem('lfc_last_user') || ''; } catch { return ''; } };
 function openSettings(required = false) {
   $('#settings').hidden = false; $('#settings').classList.toggle('required', required); document.body.classList.toggle('signin', required);
   $('#seterr').textContent = '';
   $('#setrepo').textContent = me && me.repository ? `Repository: ${me.repository}` : '';
   $('#lfuser').value = (me && (me.lf_username || me.proxy_email)) || lastUser(); $('#lfpass').value = '';
-  $('#setforget').hidden = !(me && me.has_lf_creds); $('#setcancel').hidden = required && !(me && me.has_lf_creds);
+  $('#setcancel').hidden = required && !(me && me.has_lf_creds);
   ($('#lfuser').value ? $('#lfpass') : $('#lfuser')).focus();
 }
-$('#setopen').onclick = () => openSettings(false);
 $('#setcancel').onclick = () => { $('#settings').hidden = true; document.body.classList.remove('signin'); };
 $('#setform').onsubmit = async e => {
   e.preventDefault();
@@ -252,8 +331,7 @@ $('#setform').onsubmit = async e => {
   } catch (err) { $('#seterr').textContent = err.message; }
   finally { $('#setsave').disabled = false; }
 };
-$('#signout').onclick = () => $('#setforget').click();
-$('#setforget').onclick = async () => { if (confirm('Sign out and remove your stored Laserfiche login?')) { await api('api/settings/lf', { method: 'DELETE' }); await loadMe(); job = null; render(); openSettings(true); } };
+$('#signout').onclick = async () => { if (confirm('Sign out of Laserfiche and remove your stored login?')) { await api('api/settings/lf', { method: 'DELETE' }); await loadMe(); job = null; render(); openSettings(true); } };
 function setStatus(msg, cls = '') { const s = $('#status'); s.textContent = msg; s.className = 'status ' + cls; }
 function busy(on) { $('#busy').hidden = !on; }
 
@@ -304,16 +382,17 @@ function render() {
 
   job.fields = job.fields || {};
   const t = templates.find(x => x.name === job.template) || null;
-  const sure = !!t && job.confidence >= 0.8;
+  const sure = !!t && job.confidence >= (P().unsure_below ?? 0.8);
   f.insertAdjacentHTML('beforeend', `
     <p class="summary">${esc(job.summary || 'Document read.')}</p>
     <p class="verdict ${sure ? '' : 'unsure'}">${sure ? 'Confident about the template and key fields.' : (t ? 'Not sure about this one — check the template and fields before saving.' : 'No template chosen yet — pick one and the fields will be read.')}</p>
-    ${job.lf_path ? `<p class="lfpath">Already in Laserfiche: ${esc(job.lf_path)}${job.lf_template ? ` · current template ${esc(job.lf_template)}` : ' · no template'}</p>` : ''}
+    ${job.lf_path ? `<p class="lfpath">Already in Laserfiche: ${esc(job.lf_path)}${job.lf_template ? ` · current template ${esc(job.lf_template)}` : ' · no template'}${job.mode === 'overwrite' ? ' · re-read from scratch' : ''}</p>` : ''}
+    ${job.lf_path && job.lf_template && t && t.name !== job.lf_template ? `<p class="tplchange">Template would change: <b>${esc(job.lf_template)}</b> → <b>${esc(t.name)}</b>. Existing field values are shown under each field; anything you save replaces them.</p>` : ''}
     ${job.notes ? `<p class="notes">${esc(job.notes)}</p>` : ''}
     <div class="row template"><label>Template</label>
       <select id="tpl"><option value="" ${t ? '' : 'selected'} disabled>— choose a template —</option>${templates.map(x => `<option ${t && x.name === t.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
     <div class="row" ${job.lf_path ? 'hidden' : ''}><label>File name</label><input id="fname" value="${esc(job.suggested_filename || job.source.replace(/\.pdf$/i, ''))}"></div>
-    <div class="row" ${job.lf_path ? 'hidden' : ''}><label>Save to</label><div class="withbtn"><input id="folder" value="${esc(lastFolder())}" placeholder="${esc((me && me.inbox_path) || '')}"><button class="btn" id="folderbrowse" type="button">Browse…</button></div></div>
+    <div class="row" ${job.lf_path ? 'hidden' : ''}><label>Save to</label><div class="withbtn"><input id="folder" value="${esc(lastFolder())}" placeholder="${esc(defaultFolder())}"><button class="btn" id="folderbrowse" type="button">Browse…</button></div></div>
   `);
   if (t) for (const fd of t.fields) f.appendChild(fieldRow(fd, job.fields[fd.name] || []));
   if (t) f.insertAdjacentHTML('beforeend', `<p class="hint">Every value above can be edited before saving. Change the template to re-read the document with different fields.</p>`);
@@ -334,7 +413,9 @@ function render() {
 function fieldRow(fd, values) {
   const row = document.createElement('div'); row.className = 'row' + (fd.multi ? ' multi' : '');
   row.dataset.field = fd.name;
-  row.innerHTML = `<label>${esc(fd.name)}${fd.required ? '<span class="req">*</span>' : ''}</label><div class="val"></div>`;
+  const was = job && job.lf_fields ? (job.lf_fields[fd.name] || []) : null;
+  const changed = was && was.length && JSON.stringify(was) !== JSON.stringify(values || []);
+  row.innerHTML = `<label>${esc(fd.name)}${fd.required ? '<span class="req">*</span>' : ''}${changed ? `<span class="was">Currently in Laserfiche: <b>${esc(was.join(' | '))}</b></span>` : ''}</label><div class="val"></div>`;
   const val = row.querySelector('.val');
   if (fd.multi) {
     const chips = () => { val.querySelectorAll('.chip').forEach(c => c.remove());
@@ -374,7 +455,7 @@ async function save() {
       body: JSON.stringify({ template: t.name, fields, filename: $('#fname').value || job.source, folder: ($('#folder') && $('#folder').value.trim()) || null }) });
     if ($('#folder') && $('#folder').value.trim()) remember('folder', $('#folder').value.trim());
     setStatus(job.lf_path ? `Updated entry ${res.entry_id} (${t.name})` : `Saved as ${t.name} (entry ${res.entry_id})`, 'ok');
-    await nextFromQueue();
+    if ((P().after_save || 'next') === 'stay') { job = null; render(); await loadQueue(); } else await nextFromQueue();
   } catch (e) { setStatus(e.message, 'err'); $('#save').disabled = false; }
 }
 
@@ -416,17 +497,20 @@ const recall = k => { try { return localStorage.getItem(uKey(k)) || ''; } catch 
 function openBrowser(startPath, onPick) {
   brOnPick = onPick; $('#browse').hidden = false;
   // start where this user last browsed; first time ever, the repository root
-  brLoad(recall('browsed') || '\\');
+  brLoad(recall('browsed') || P().working_folder || '\\');
 }
-function lastFolder() { return recall('folder') || (me && me.inbox_path) || ''; }
+function lastFolder() { return P().working_folder || recall('folder') || (me && me.inbox_path) || ''; }
 $('#bfbrowse').onclick = () => openBrowser($('#bffolder').value, p => { $('#bffolder').value = p; $('#bfscan').click(); });
+const syncMode = () => { $('#bfmodewrap').hidden = $('#bffilter').value === '1'; };
+$('#bffilter').addEventListener('change', syncMode);
+$('#bfmode').addEventListener('change', () => remember('bfmode', $('#bfmode').value));
 $('#brup').onclick = () => brLoad(brCur === '\\' ? '\\' : brCur.replace(/\\[^\\]*$/, '') || '\\');
 $('#brcancel').onclick = () => { $('#browse').hidden = true; };
 $('#bruse').onclick = () => { $('#browse').hidden = true; if (brOnPick) brOnPick(brCur); };
 
 // ---- backfill panel ----
 let bfDocs = [];
-$('#bfopen').onclick = () => { $('#bf').hidden = false; if (!$('#bffolder').value) $('#bffolder').value = recall('scan'); $('#bffolder').focus(); pollBf(); };
+$('#bfopen').onclick = () => { $('#bf').hidden = false; if (!$('#bffolder').value) $('#bffolder').value = recall('scan'); $('#bfmode').value = recall('bfmode') || 'keep'; syncMode(); $('#bffolder').focus(); pollBf(); };
 $('#bfclose').onclick = () => { $('#bf').hidden = true; };
 $('#bfscan').onclick = async () => {
   const folder = $('#bffolder').value.trim(); if (!folder) return;
@@ -446,8 +530,10 @@ $('#bfscan').onclick = async () => {
 $('#bfqueue').onclick = async () => {
   const ids = [...document.querySelectorAll('.bfck:checked')].map(c => bfDocs[+c.dataset.i].id);
   if (!ids.length) return;
-  if (!confirm(`Read ${ids.length} document${ids.length === 1 ? '' : 's'} and add them to the review queue? Nothing is written to Laserfiche until you press Update on each one.`)) return;
-  const r = await api('api/backfill/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_ids: ids }) });
+  const mode = $('#bffilter').value === '1' ? 'keep' : $('#bfmode').value;
+  const how = mode === 'overwrite' ? 'Documents that already have a template will be re-read from scratch; the review page will show what would change.' : 'Documents that already have a template keep it and their existing values; only empty fields get filled in.';
+  if (!confirm(`Read ${ids.length} document${ids.length === 1 ? '' : 's'} and add them to the review queue?\n\n${how}\n\nNothing is written to Laserfiche until you press Update on each one.`)) return;
+  const r = await api('api/backfill/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_ids: ids, mode }) });
   $('#bfinfo').textContent = `${r.queued} being read — they appear in the review queue as they finish. Close this panel to review.`;
   $('#bfscan').click();
 };

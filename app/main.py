@@ -108,6 +108,7 @@ def api_me(request: Request):
     u = users.current_user(request)
     creds = users.get_creds(u) if u else None
     return {"lf_username": creds["username"] if creds else None, "has_lf_creds": bool(creds),
+            "prefs": users.get_prefs(u) if creds else dict(users.DEFAULT_PREFS),
             "proxy_email": (request.headers.get("x-auth-request-email") or "").strip().lower() or None,  # from oauth2-proxy, if configured
             "inbox_path": os.environ.get("LF_INBOX_PATH", ""), "repository": os.environ.get("LF_REPOSITORY_ID", ""),
             "mailbox_enabled": bool(os.environ.get("MAIL_MAILBOX")) and _svc is not None}
@@ -126,6 +127,32 @@ def api_set_lf(req: LfCredsRequest, response: Response):
         raise HTTPException(400, f"Laserfiche rejected that login: {e}")
     users.set_session(response, req.username)
     return {"ok": True}
+
+
+class PrefsRequest(BaseModel):
+    working_folder: str | None = None
+    show_shared: bool | None = None
+    scan_only_no_template: bool | None = None
+    scan_recursive: bool | None = None
+    unsure_below: float | None = None
+    after_save: str | None = None
+
+
+@app.put("/api/settings/prefs")
+def api_set_prefs(req: PrefsRequest, request: Request, lf: LaserficheClient = Depends(users.lf_for)):
+    u = users.require_user(request)
+    data = {k: v for k, v in req.model_dump().items() if v is not None}
+    if data.get("working_folder"):
+        data["working_folder"] = data["working_folder"].strip().rstrip("\\")
+        try:
+            folder_entry_id(lf, data["working_folder"])   # must exist and be visible to this user
+        except LaserficheError:
+            raise HTTPException(400, f"Folder not found in Laserfiche: {data['working_folder']}")
+    if "unsure_below" in data:
+        data["unsure_below"] = min(1.0, max(0.0, float(data["unsure_below"])))
+    if "after_save" in data and data["after_save"] not in ("next", "stay"):
+        raise HTTPException(400, "after_save must be next or stay")
+    return users.set_prefs(u, data)
 
 
 @app.delete("/api/settings/lf")
@@ -149,7 +176,8 @@ def api_templates(refresh: bool = False, lf: LaserficheClient = Depends(users.lf
 def api_queue(request: Request):
     """Drop-folder PDFs (shared) plus extracted-but-unsaved jobs: the caller's own first, then shared ones."""
     user = users.current_user(request)
-    pending = sorted(p.name for p in INBOX.glob("*.pdf"))
+    show_shared = users.get_prefs(user)["show_shared"] if user else True
+    pending = sorted(p.name for p in INBOX.glob("*.pdf")) if show_shared else []
     mine, shared = [], []
     for d in sorted(WORK.iterdir(), key=lambda p: p.stat().st_mtime):
         m = d / "meta.json"
@@ -161,7 +189,8 @@ def api_queue(request: Request):
         row = {"id": d.name, "source": meta.get("source"), "template": meta.get("template"), "confidence": meta.get("confidence"),
                "lf_path": meta.get("lf_path"), "owner": meta.get("owner")}
         if not meta.get("owner"):
-            shared.append(row)
+            if show_shared:
+                shared.append(row)
         elif meta.get("owner") == user:
             mine.append(row)
     return {"inbox": pending, "jobs": mine + shared, "mine": len(mine), "shared": len(shared) + len(pending)}
@@ -240,6 +269,7 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
     if meta.get("lf_entry_id"):
         entry_id = int(meta["lf_entry_id"])
         lf.update_document(entry_id, template, fields, meta.get("lf_template"))
+        _bf_seen.discard(entry_id)
     else:
         try:
             parent = folder_entry_id(lf, folder)
@@ -267,6 +297,8 @@ def api_save(job_id: str, req: SaveRequest, request: Request, lf: LaserficheClie
 def api_discard(job_id: str, request: Request):
     d = _job_dir(job_id, users.require_user(request))
     meta = json.loads((d / "meta.json").read_text())
+    if meta.get("lf_entry_id"):
+        _bf_seen.discard(int(meta["lf_entry_id"]))
     claimed = WORK / f"{meta.get('source', '')}.claimed"
     if claimed.exists():
         shutil.move(claimed, FAILED / meta["source"])
@@ -298,7 +330,7 @@ def _from_mailbox(name: str, pdf: bytes, context: str) -> None:
 
 
 # ---------- backfill: documents already in Laserfiche ----------
-_bf_queue: "queue.Queue[tuple[int, str]]" = queue.Queue()
+_bf_queue: "queue.Queue[tuple[int, str, str]]" = queue.Queue()
 _bf_state = {"queued": 0, "done": 0, "failed": 0, "errors": []}
 _bf_seen: set[int] = set()
 
@@ -331,18 +363,20 @@ def api_lf_folders(path: str = "\\", lf: LaserficheClient = Depends(users.lf_for
 
 class QueueRequest(BaseModel):
     entry_ids: list[int]
+    mode: str = "keep"   # keep = keep existing template, fill empty fields only; overwrite = re-read everything
 
 
 @app.post("/api/backfill/queue")
 def api_backfill_queue(req: QueueRequest, request: Request):
     email = users.require_user(request)
     users.client_for(email)  # fail fast if no credentials
+    mode = "overwrite" if req.mode == "overwrite" else "keep"
     n = 0
     for eid in req.entry_ids:
         if eid in _bf_seen:
             continue
         _bf_seen.add(eid)
-        _bf_queue.put((eid, email))
+        _bf_queue.put((eid, email, mode))
         n += 1
     _bf_state["queued"] += n
     return {"queued": n}
@@ -353,21 +387,34 @@ def api_backfill_status():
     return {**_bf_state, "pending": _bf_queue.qsize(), "errors": _bf_state["errors"][-10:]}
 
 
-def _backfill_one(entry_id: int, email: str) -> None:
+def _backfill_one(entry_id: int, email: str, mode: str = "keep") -> None:
     lf = users.client_for(email)
     entry = lf.get_entry(entry_id)
     pdf = lf.export_pdf(entry_id, entry)
     existing = lf.entry_fields(entry_id)
-    ctx = (f"This document is ALREADY in Laserfiche at: {entry.get('fullPath')}\n"
-           f"Current template: {entry.get('templateName') or 'none'}\n"
-           f"Existing field values (keep them unless the document clearly says otherwise): "
-           f"{json.dumps(existing) if existing else 'none'}")
+    current_tpl = entry.get("templateName") or None
+    if mode == "overwrite" or not current_tpl:
+        ctx = (f"This document is ALREADY in Laserfiche at: {entry.get('fullPath')}\n"
+               f"It is currently filed under template: {current_tpl or 'none'} — this MAY be wrong; choose the correct template from the document itself.\n"
+               f"Existing field values (may be wrong or outdated; read the document and give the correct values): "
+               f"{json.dumps(existing) if existing else 'none'}")
+        forced = None
+    else:
+        ctx = (f"This document is ALREADY in Laserfiche at: {entry.get('fullPath')}\n"
+               f"Current template: {current_tpl}\n"
+               f"Existing field values (these will be kept; your job is to fill the EMPTY fields): "
+               f"{json.dumps(existing) if existing else 'none'}")
+        forced = current_tpl
     job_id = _new_job(pdf, f"LF {entry_id}: {entry.get('name')}", ctx, owner=email)
     m = WORK / job_id / "meta.json"
     m.write_text(json.dumps({**json.loads(m.read_text()), "lf_entry_id": entry_id, "lf_path": entry.get("fullPath"),
-                             "lf_template": entry.get("templateName"), "lf_fields": existing, "owner": email}))
+                             "lf_template": current_tpl, "lf_fields": existing, "owner": email, "mode": mode}))
     try:
-        _run_extract(job_id, entry.get("templateName") or None, lf)
+        result = _run_extract(job_id, forced, lf)
+        if mode != "overwrite" and current_tpl:
+            # keep mode: values already in Laserfiche win; Claude only supplies the blanks
+            merged = {**result["fields"], **{k: v for k, v in existing.items() if v}}
+            meta = json.loads(m.read_text()); meta["fields"] = merged; m.write_text(json.dumps(meta))
     except Exception as e:
         m.write_text(json.dumps({**json.loads(m.read_text()), "template": entry.get("templateName"), "fields": existing,
                                  "confidence": 0, "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}))
@@ -375,9 +422,9 @@ def _backfill_one(entry_id: int, email: str) -> None:
 
 def _backfill_worker():
     while True:
-        eid, email = _bf_queue.get()
+        eid, email, mode = _bf_queue.get()
         try:
-            _backfill_one(eid, email)
+            _backfill_one(eid, email, mode)
             _bf_state["done"] += 1
         except Exception as e:
             _bf_state["failed"] += 1
@@ -385,6 +432,19 @@ def _backfill_worker():
             _bf_seen.discard(eid)
         finally:
             _bf_queue.task_done()
+
+
+@app.on_event("startup")
+def _restore_seen():
+    for d in WORK.iterdir():
+        mp = d / "meta.json"
+        if d.is_dir() and mp.exists():
+            try:
+                eid = json.loads(mp.read_text()).get("lf_entry_id")
+                if eid:
+                    _bf_seen.add(int(eid))
+            except Exception:
+                pass
 
 
 @app.on_event("startup")

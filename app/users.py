@@ -136,3 +136,31 @@ def service_client() -> LaserficheClient | None:
     if os.environ.get("LF_USERNAME") and os.environ.get("LF_PASSWORD"):
         return LaserficheClient(os.environ["LF_USERNAME"], os.environ["LF_PASSWORD"])
     return None
+
+
+# ---- per-user preferences (stored alongside the credentials record) ----
+DEFAULT_PREFS = {
+    "working_folder": "",          # default Save-to and Browse start; blank = LF_INBOX_PATH
+    "show_shared": True,           # see drop-folder / mailbox documents in the queue
+    "scan_only_no_template": True, # From Laserfiche defaults
+    "scan_recursive": False,
+    "unsure_below": 0.8,           # confidence under this shows the "not sure" flag
+    "after_save": "next",          # next | stay
+}
+
+
+def get_prefs(username: str) -> dict:
+    rec = _load().get(_key(username)) or {}
+    return {**DEFAULT_PREFS, **(rec.get("prefs") or {})}
+
+
+def set_prefs(username: str, prefs: dict) -> dict:
+    clean = {k: prefs[k] for k in DEFAULT_PREFS if k in prefs}
+    with _lock:
+        d = _load()
+        rec = d.get(_key(username))
+        if not rec:
+            raise HTTPException(401, "lf_credentials_required")
+        rec["prefs"] = {**(rec.get("prefs") or {}), **clean}
+        _dump(d)
+    return {**DEFAULT_PREFS, **rec["prefs"]}
