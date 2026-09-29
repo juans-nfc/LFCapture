@@ -423,9 +423,9 @@ class LfReadRequest(BaseModel):
 def _wf_client(user: str | None) -> tuple[LaserficheClient, str]:
     """Client to act as: the named user's stored login if they have one, else the service account."""
     if user:
-        for cand in (user, user.split("\\")[-1], user.split("@")[0]):
-            if users.get_creds(cand):
-                return users.client_for(cand), cand
+        k = users.resolve_username(user)
+        if k:
+            return users.client_for(k), users.get_creds(k)["username"]
     if _svc is not None:
         return _svc, "service"
     raise HTTPException(400, "No usable Laserfiche login: the user has not signed in to LF Capture and no service account is configured")

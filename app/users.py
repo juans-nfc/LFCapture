@@ -78,8 +78,29 @@ def clear_session(response: Response) -> None:
 
 
 # ---- credential store ----
+def _short(name: str) -> str:
+    """'northernfruit\\juans', 'juans@northernfruit.com', 'JUANS' -> 'juans'"""
+    n = name.strip().lower()
+    n = n.split("\\")[-1]
+    n = n.split("@")[0]
+    return n
+
+
+def resolve_username(name: str) -> str | None:
+    """Find the stored login that belongs to this person, whichever form the name is in."""
+    d = _load()
+    if _key(name) in d:
+        return _key(name)
+    want = _short(name)
+    matches = [k for k in d if _short(k) == want]
+    return matches[0] if len(matches) == 1 else None
+
+
 def get_creds(username: str) -> dict | None:
     rec = _load().get(_key(username))
+    if not rec:
+        k = resolve_username(username)
+        rec = _load().get(k) if k else None
     if not rec:
         return None
     return {"username": rec["username"], "password": _fernet().decrypt(rec["password"].encode()).decode()}
@@ -103,7 +124,7 @@ def clear_creds(username: str) -> None:
 
 
 def client_for(username: str) -> LaserficheClient:
-    k = _key(username)
+    k = resolve_username(username) or _key(username)
     with _lock:
         c = _clients.get(k)
         if c:
