@@ -244,6 +244,9 @@
     <label class="check"><input id="p_scan_nt" type="checkbox"> Only list documents with no template</label>
     <label class="check"><input id="p_scan_rec" type="checkbox"> Include subfolders</label>
 
+    <h3>What it has learned</h3>
+    <div id="p_lessons" class="fine" style="margin:0 0 6px">Loading…</div>
+
     <h3>Laserfiche account</h3>
     <div class="account"><span id="p_user"></span><span style="flex:1"></span><button class="btn" id="p_relogin" type="button">Change login…</button></div>
 
@@ -332,6 +335,14 @@ function openPrefs() {
   $('#p_automin').value = p.auto_file_min ?? 0.9; $('#p_automin_out').textContent = Math.round($('#p_automin').value * 100) + '%';
   $('#p_user').textContent = me && me.lf_username ? `Signed in as ${me.lf_username}` : '';
   $('#preferr').textContent = ''; $('#prefs').hidden = false;
+  api('api/corrections?limit=8').then(c => {
+    const el = $('#p_lessons');
+    if (!c.total) { el.textContent = 'Nothing yet. Every value you change before saving becomes a lesson for future reads of that template.'; return; }
+    const line = r => r.kind === 'template' ? `read as <b>${esc(r.proposed)}</b> → actually <b>${esc(r.final)}</b>`
+      : `${esc(r.template)} · ${esc(r.field)}: <b>${esc((r.proposed || []).join(' | ') || '(blank)')}</b> → <b>${esc((r.final || []).join(' | ') || '(blank)')}</b>`;
+    el.innerHTML = `${c.total} correction${c.total === 1 ? '' : 's'} recorded so far; the most recent ones are shown to Claude on every read. Latest:<br>` +
+      c.items.map(r => `• ${line(r)}`).join('<br>');
+  }).catch(() => { $('#p_lessons').textContent = ''; });
 }
 $('#prefopen').onclick = openPrefs;
 $('#prefcancel').onclick = () => { $('#prefs').hidden = true; };

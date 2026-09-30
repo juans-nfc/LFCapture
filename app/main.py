@@ -90,7 +90,7 @@ def _new_job(pdf_bytes: bytes, source_name: str, context: str = "", owner: str |
 def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = None) -> dict:
     d = _job_dir(job_id)
     meta = json.loads((d / "meta.json").read_text())
-    result = extractor.extract((d / "doc.pdf").read_bytes(), templates(lf), forced, meta.get("context", ""))
+    result = extractor.extract((d / "doc.pdf").read_bytes(), templates(lf), forced, meta.get("context", ""), lessons=_lessons_text(forced))
     meta.update(result)
     (d / "meta.json").write_text(json.dumps(meta))
     return {"id": job_id, **meta}
@@ -316,6 +316,7 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
     missing = [f["name"] for f in tdef["fields"] if f["required"] and not [v for v in fields.get(f["name"], []) if v]]
     if missing:
         raise HTTPException(400, "Required fields missing: " + ", ".join(missing))
+    _record_corrections(json.loads((d / "meta.json").read_text()), template, fields, getattr(lf, "user", None))
     too_long = [f"{f['name']} ({max(len(v) for v in fields.get(f['name'], []))} chars, max {f['length']})"
                 for f in tdef["fields"] if f.get("length") and fields.get(f["name"]) and any(len(v) > f["length"] for v in fields[f["name"]])]
     if too_long:
@@ -382,6 +383,82 @@ def _from_mailbox(name: str, pdf: bytes, context: str) -> None:
         m = WORK / job_id / "meta.json"
         m.write_text(json.dumps({**json.loads(m.read_text()), "template": None, "fields": {}, "confidence": 0,
                                  "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}))
+
+
+# ---------- corrections memory: what humans changed before saving -> lessons for future reads ----------
+CORRECTIONS = WORK / "corrections.jsonl"
+
+
+def _norm(v) -> list[str]:
+    vals = v if isinstance(v, list) else ([v] if v not in (None, "") else [])
+    return [str(x).strip() for x in vals if str(x).strip()]
+
+
+def _record_corrections(meta: dict, template: str, fields: dict[str, list[str]], user: str | None) -> None:
+    """Compare what Claude proposed (meta) with what the human saved; append the differences."""
+    if not meta.get("template") and not meta.get("fields"):
+        return  # nothing was proposed (e.g. failed read)
+    rows = []
+    base = {"at": time.time(), "user": user, "source": meta.get("source"), "template": template}
+    if meta.get("template") and meta["template"] != template:
+        rows.append({**base, "kind": "template", "proposed": meta["template"], "final": template})
+    proposed = meta.get("fields") or {}
+    for name in set(proposed) | set(fields):
+        a, b = _norm(proposed.get(name)), _norm(fields.get(name))
+        if a == b:
+            continue
+        if not a and not b:
+            continue
+        rows.append({**base, "kind": "field", "field": name, "proposed": a, "final": b})
+    if rows:
+        with _lock:
+            with CORRECTIONS.open("a") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+
+
+def _load_corrections(limit: int = 400) -> list[dict]:
+    if not CORRECTIONS.exists():
+        return []
+    lines = CORRECTIONS.read_text().splitlines()[-limit:]
+    return [json.loads(l) for l in lines if l.strip()]
+
+
+def _lessons_text(template: str | None = None, max_lines: int = 40) -> str:
+    """Recent human corrections, most recent first, de-duplicated per (template, field, proposed->final)."""
+    rows = list(reversed(_load_corrections()))
+    if template:
+        rows = [r for r in rows if r.get("template") == template or (r["kind"] == "template" and r.get("proposed") == template)]
+    seen, out = set(), []
+    for r in rows:
+        if r["kind"] == "template":
+            key = ("t", r["proposed"], r["final"])
+            line = f'- A document read as "{r["proposed"]}" was actually "{r["final"]}" (document "{r.get("source")}").'
+        else:
+            key = ("f", r["template"], r["field"], "|".join(r["proposed"]), "|".join(r["final"]))
+            if r["proposed"] and r["final"]:
+                line = f'- {r["template"]} · {r["field"]}: read as "{" | ".join(r["proposed"])}", correct was "{" | ".join(r["final"])}" (document "{r.get("source")}").'
+            elif r["final"]:
+                line = f'- {r["template"]} · {r["field"]}: was left empty but should have been "{" | ".join(r["final"])}" (document "{r.get("source")}").'
+            else:
+                line = f'- {r["template"]} · {r["field"]}: read as "{" | ".join(r["proposed"])}" but the reviewer cleared it — it was not on the document.'
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+        if len(out) >= max_lines:
+            break
+    if not out:
+        return ""
+    return ("Lessons from past human corrections on this kind of document (most recent first). "
+            "Apply the patterns they show — which printed value belongs in which field, what to leave blank — not the literal values:\n" + "\n".join(out))
+
+
+@app.get("/api/corrections")
+def api_corrections(request: Request, limit: int = 50):
+    users.require_user(request)
+    rows = list(reversed(_load_corrections()))[:limit]
+    return {"items": rows, "total": len(_load_corrections(100000))}
 
 
 # ---------- activity log: things filed without review ----------
