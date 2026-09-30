@@ -22,6 +22,7 @@ from pydantic import BaseModel  # noqa: E402
 from . import extractor, mailbox  # noqa: E402
 from .laserfiche import LaserficheClient, LaserficheError  # noqa: E402
 from . import users  # noqa: E402
+from . import as400  # noqa: E402
 
 INBOX = Path(os.environ.get("INBOX_DIR", "./inbox"))
 WORK = Path(os.environ.get("WORK_DIR", "./work"))
@@ -864,5 +865,9 @@ def _start_mail():
     for i in range(int(os.environ.get("BACKFILL_WORKERS", "3"))):
         threading.Thread(target=_backfill_worker, daemon=True, name=f"backfill-{i}").start()
 
+
+# AS400 → Laserfiche metadata bridge (see docs-fill-from-as400.md)
+as400.install(app, wf_token=WF_TOKEN, wf_client=_wf_client, lenient_json=_lenient_json,
+              templates=templates, log_activity=_log_activity, tag_failed=TAG_FAILED)
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
