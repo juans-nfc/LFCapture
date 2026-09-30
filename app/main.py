@@ -22,7 +22,6 @@ from pydantic import BaseModel  # noqa: E402
 from . import extractor, mailbox  # noqa: E402
 from .laserfiche import LaserficheClient, LaserficheError  # noqa: E402
 from . import users  # noqa: E402
-from . import as400  # noqa: E402
 
 INBOX = Path(os.environ.get("INBOX_DIR", "./inbox"))
 WORK = Path(os.environ.get("WORK_DIR", "./work"))
@@ -88,10 +87,50 @@ def _new_job(pdf_bytes: bytes, source_name: str, context: str = "", owner: str |
     return job_id
 
 
+ALIASES_FILE = Path(os.environ.get("ALIASES_FILE", str(WORK / "aliases.json")))
+
+
+def _aliases() -> dict:
+    """{ "Sold To": { "northern fruit company": "Northern Fruit", ... }, "*": {...} } — keys compared case-insensitively."""
+    try:
+        raw = json.loads(ALIASES_FILE.read_text()) if ALIASES_FILE.exists() else {}
+    except Exception:
+        return {}
+    return {field: {str(k).strip().lower(): v for k, v in mapping.items()} for field, mapping in raw.items()}
+
+
+def _snap_values(template: str | None, fields: dict[str, list[str]], catalog: list[dict]) -> dict[str, list[str]]:
+    """Make proposed values match what Laserfiche will accept: aliases first, then fixed list values."""
+    tdef = next((t for t in catalog if t["name"] == template), None)
+    aliases = _aliases()
+    out = {}
+    for name, vals in fields.items():
+        fdef = next((f for f in (tdef["fields"] if tdef else []) if f["name"] == name), None)
+        amap = {**aliases.get("*", {}), **aliases.get(name, {})}
+        allowed = (fdef or {}).get("list") or []
+        snapped = []
+        for v in vals:
+            key = str(v).strip().lower()
+            if key in amap:
+                v = amap[key]
+            if allowed:
+                exact = next((a for a in allowed if a.strip().lower() == str(v).strip().lower()), None)
+                if exact:
+                    v = exact
+                else:
+                    close = [a for a in allowed if str(v).strip().lower().startswith(a.strip().lower()) or a.strip().lower().startswith(str(v).strip().lower())]
+                    if len(close) == 1:
+                        v = close[0]
+            snapped.append(v)
+        out[name] = snapped
+    return out
+
+
 def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = None) -> dict:
     d = _job_dir(job_id)
     meta = json.loads((d / "meta.json").read_text())
     result = extractor.extract((d / "doc.pdf").read_bytes(), templates(lf), forced, meta.get("context", ""), lessons=_lessons_text(forced))
+    result["fields"] = _snap_values(result.get("template"), result.get("fields", {}), templates(lf))
     meta.update(result)
     (d / "meta.json").write_text(json.dumps(meta))
     return {"id": job_id, **meta}
@@ -825,9 +864,5 @@ def _start_mail():
     for i in range(int(os.environ.get("BACKFILL_WORKERS", "3"))):
         threading.Thread(target=_backfill_worker, daemon=True, name=f"backfill-{i}").start()
 
-
-# AS400 → Laserfiche metadata bridge (see docs-fill-from-as400.md)
-as400.install(app, wf_token=WF_TOKEN, wf_client=_wf_client, lenient_json=_lenient_json,
-              templates=templates, log_activity=_log_activity, tag_failed=TAG_FAILED)
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")

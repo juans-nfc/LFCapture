@@ -92,6 +92,7 @@ def extract(pdf_bytes: bytes, templates: list[dict], forced_template: str | None
         + ("The template is fixed by the operator; do not change it. " if forced_template else "Choose the single best-matching template. ")
         + "Fill only fields you can actually read from the document; leave unknown fields out rather than guessing. "
         "Never pick a list value just because the field is required — omit it if the document does not state it. "
+        "When the document shows a longer or slightly different form of an allowed list value (e.g. 'Northern Fruit Company' where the allowed value is 'Northern Fruit'), use the allowed value. "
         "Order numbers, PO numbers and invoice numbers must be copied exactly as printed. "
         "If a multi-value field applies to several values (e.g. several order numbers on one packing list), include all of them.\n\n"
         f"Available templates:\n{catalog}"
