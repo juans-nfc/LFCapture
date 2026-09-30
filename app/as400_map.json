@@ -1,0 +1,16 @@
+{
+  "_comment": "Maps AS400 screen values onto the Laserfiche AP template. Left side = Laserfiche field name (must match the template exactly). Right side = AS400 keys from the AS400 Bridge capture, first non-empty wins ('a|b'). Lists (apSubGlNum) fill multi-value fields, or are joined with commas for single-value fields. Dates M/D/YYYY are converted for Date fields automatically.",
+  "template": "AP Invoice",
+  "invoice_field": "Invoice Number",
+  "overwrite": true,
+  "screens": ["apLedgerSingle", "apLedgerMulti", "vendorPaymentHistory"],
+  "fields": {
+    "Invoice Number": "apInvoiceNumber|vphInvoiceNumber",
+    "Invoice Date":   "apInvoiceDate|vphInvoiceDate",
+    "Invoice Amount": "apInvoiceAmt|vphInvoiceAmt",
+    "Company":        "apCompany|vphCompanyName",
+    "Vendor ID":      "apVendorID|vphVendorId",
+    "Vendor Name":    "apVendorName|vphVendorName",
+    "GL Account":     "apSubGlNum"
+  }
+}
