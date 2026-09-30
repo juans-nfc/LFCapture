@@ -122,17 +122,50 @@ def _coerce(values: list[str], ftype: str) -> list[str]:
     return out
 
 
-def build_fields(record: dict, tdef: dict | None, fmap: dict[str, str]) -> dict[str, list[str]]:
+def _match_list(value: str, choices: list[str]) -> str | None:
+    """Map free text onto a dropdown value: exact, case-insensitive, then prefix/contains either way."""
+    if not choices:
+        return None
+    if value in choices:
+        return value
+    v = value.strip().lower()
+    for c in choices:
+        if c.strip().lower() == v:
+            return c
+    for c in choices:
+        cl = c.strip().lower()
+        if cl and (v.startswith(cl) or cl.startswith(v)):
+            return c
+    for c in choices:
+        cl = c.strip().lower()
+        if cl and (cl in v or v in cl):
+            return c
+    return None
+
+
+def build_fields(record: dict, tdef: dict | None, fmap: dict[str, str], value_maps: dict[str, dict[str, str]] | None = None) -> dict[str, list[str]]:
     """Map an AS400 record onto Laserfiche field names using the template definition for types/lengths."""
     defs = {f["name"]: f for f in (tdef or {}).get("fields", [])}
+    value_maps = value_maps or {}
     out: dict[str, list[str]] = {}
     for lf_name, spec in fmap.items():
         values = _pick(record, spec)
         if not values:
             continue
+        vm = value_maps.get(lf_name) or {}
+        values = [vm.get(v, vm.get(v.strip().upper(), v)) for v in values]
         fdef = defs.get(lf_name)
         if fdef:
             values = _coerce(values, fdef.get("type", "String"))
+            if fdef.get("list"):
+                mapped = []
+                for v in values:
+                    hit = _match_list(v, fdef["list"])
+                    if hit is None:
+                        log.warning("as400: %r is not one of the list values for %r; sending as-is", v, lf_name)
+                        hit = v
+                    mapped.append(hit)
+                values = mapped
             if not fdef.get("multi") and len(values) > 1:
                 values = [", ".join(values)]
             if fdef.get("length"):
@@ -228,7 +261,7 @@ def install(app: FastAPI, *, wf_token: str, wf_client: Callable[[str | None], tu
         if tdef is None:
             raise HTTPException(500, f"Template {template!r} not found in Laserfiche (check as400_map.json)")
 
-        mapped = build_fields(record, tdef, m.get("fields", {}))
+        mapped = build_fields(record, tdef, m.get("fields", {}), m.get("value_maps"))
         if not mapped:
             raise HTTPException(409, "AS400 record produced no field values — check as400_map.json")
 

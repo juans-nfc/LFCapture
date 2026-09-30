@@ -1,16 +1,25 @@
 {
-  "_comment": "Maps AS400 screen values onto the Laserfiche AP template. Left side = Laserfiche field name (must match the template exactly). Right side = AS400 keys from the AS400 Bridge capture, first non-empty wins ('a|b'). Lists (apSubGlNum) fill multi-value fields, or are joined with commas for single-value fields. Dates M/D/YYYY are converted for Date fields automatically.",
-  "template": "AP Invoice",
+  "_comment": "Left = Laserfiche field name on the template (exact). Right = AS400 Bridge capture key; 'a|b' = first non-empty wins. Lists (apSubGlNum) fill multi-value fields or are joined with commas. Dates M/D/YYYY become ISO for Date fields. For dropdown (list) fields the AS400 text is matched to the list values case-insensitively, then by prefix/contains; value_maps gives explicit overrides.",
+  "template": "Paid Invoice",
   "invoice_field": "Invoice Number",
   "overwrite": true,
-  "screens": ["apLedgerSingle", "apLedgerMulti", "vendorPaymentHistory"],
+  "screens": ["apLedgerSingle", "apLedgerList", "apLedgerMulti", "vendorPaymentHistory"],
   "fields": {
     "Invoice Number": "apInvoiceNumber|vphInvoiceNumber",
     "Invoice Date":   "apInvoiceDate|vphInvoiceDate",
-    "Invoice Amount": "apInvoiceAmt|vphInvoiceAmt",
-    "Company":        "apCompany|vphCompanyName",
+    "Check Date":     "apCheckDate",
+    "Check Number":   "apCheckNumber",
+    "GL Number":      "apSubGlNum",
+    "Amount":         "apInvoiceAmt|vphInvoiceAmt",
+    "Company1":       "apCompany|vphCompanyName",
+    "Payee":          "apVendorID|vphVendorId",
+    "PayeeName":      "apVendorName|vphVendorName",
     "Vendor ID":      "apVendorID|vphVendorId",
-    "Vendor Name":    "apVendorName|vphVendorName",
-    "GL Account":     "apSubGlNum"
+    "Vendor Name":    "apVendorName|vphVendorName"
+  },
+  "value_maps": {
+    "Company1": {
+      "NORTHERN FRUIT COMPANY, INC.": "Northern Fruit"
+    }
   }
 }
