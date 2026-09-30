@@ -406,7 +406,7 @@ def api_activity(request: Request, limit: int = 30):
 
 # ---------- in-Laserfiche flow: Workflow / Business Process calls this, results are written straight onto the entries ----------
 WF_TOKEN = os.environ.get("LF_WORKFLOW_TOKEN", "")
-TAG_PROPOSED = os.environ.get("LF_TAG_PROPOSED", "AI-Proposed")
+TAG_PROPOSED = os.environ.get("LF_TAG_PROPOSED", "")   # blank = don't tag successful reads
 TAG_UNSURE = os.environ.get("LF_TAG_UNSURE", "AI-Unsure")
 TAG_FAILED = os.environ.get("LF_TAG_FAILED", "AI-Failed")
 DIRECT_UNSURE_BELOW = float(os.environ.get("DIRECT_UNSURE_BELOW", "0.8"))
@@ -473,6 +473,36 @@ async def api_lf_read(request: Request):
     return {"queued": n, "acting_as": who, "mode": mode}
 
 
+def _notify_failure(who: str, entry: dict, error: str) -> None:
+    """Email the person who started the read when it fails after Workflow has already returned."""
+    host = os.environ.get("SMTP_HOST")
+    domain = os.environ.get("NOTIFY_DOMAIN")
+    if not host or not domain or who == "service":
+        return
+    import smtplib
+    from email.message import EmailMessage
+    short = who.split("\\")[-1].split("@")[0]
+    to = f"{short}@{domain}"
+    msg = EmailMessage()
+    msg["From"] = os.environ.get("SMTP_FROM", f"lfcapture@{domain}")
+    msg["To"] = to
+    msg["Subject"] = f"LF Capture could not read: {entry.get('name')}"
+    msg.set_content(
+        f"LF Capture was asked to read this document but could not finish.\n\n"
+        f"Document: {entry.get('name')}\nFolder: {entry.get('fullPath')}\nEntry ID: {entry.get('id')}\n\n"
+        f"Reason: {error}\n\nThe document has been tagged {TAG_FAILED}. Fill in its metadata by hand, or fix the cause and start the business process again."
+    )
+    try:
+        with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "25")), timeout=15) as sm:
+            if os.environ.get("SMTP_STARTTLS", "0") == "1":
+                sm.starttls()
+            if os.environ.get("SMTP_USER"):
+                sm.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASSWORD", ""))
+            sm.send_message(msg)
+    except Exception as ex:
+        logging.getLogger("lf-capture").warning("failure e-mail to %s not sent: %s", to, ex)
+
+
 def _direct_one(entry_id: int, who: str, mode: str) -> None:
     """Read one existing entry and write the result straight back into Laserfiche, tagged for human review."""
     lf = _svc if who == "service" else users.client_for(who)
@@ -508,7 +538,8 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
         lf.update_document(entry_id, template, fields, current_tpl)
         unsure = result["confidence"] < DIRECT_UNSURE_BELOW
         try:
-            lf.set_tags(entry_id, add=[TAG_PROPOSED] + ([TAG_UNSURE] if unsure else []), remove=[TAG_FAILED] + ([] if unsure else [TAG_UNSURE]))
+            add = ([TAG_PROPOSED] if TAG_PROPOSED else []) + ([TAG_UNSURE] if unsure else [])
+            lf.set_tags(entry_id, add=add, remove=[TAG_FAILED] + ([] if unsure else [TAG_UNSURE]))
         except LaserficheError as e:
             logging.getLogger("lf-capture").warning("tagging %s failed (do the tags exist in the repository?): %s", entry_id, e)
         _log_activity(who, kind="lf_direct", source=entry.get("name"), template=template, entry_id=entry_id, folder=entry.get("fullPath"),
@@ -519,6 +550,7 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
         except Exception:
             pass
         _log_activity(who, kind="lf_direct_failed", source=entry.get("name"), entry_id=entry_id, folder=entry.get("fullPath"), error=str(e))
+        _notify_failure(who, entry, str(e))
         raise
     finally:
         shutil.rmtree(WORK / job_id, ignore_errors=True)
