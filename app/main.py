@@ -417,6 +417,7 @@ class LfReadRequest(BaseModel):
     entry_id: int | None = None          # convenience for Workflow (one token)
     token: str | None = None             # alternative to the Authorization header (Workflow can't always set headers)
     user: str | None = None              # LF username of the person who started it (Workflow %(Initiator)); optional
+    creator: str | None = None           # fallback identity (Workflow %(Creator)) for folder-triggered runs
     mode: str = "keep"                   # keep | overwrite (for entries that already have a template)
     recursive: bool = False              # when an entry is a folder: include subfolders
 
@@ -452,7 +453,7 @@ async def api_lf_read(request: Request):
     auth = request.headers.get("authorization", "")
     if not WF_TOKEN or (auth != f"Bearer {WF_TOKEN}" and (req.token or "") != WF_TOKEN):
         raise HTTPException(401, "bad or missing LF_WORKFLOW_TOKEN")
-    lf, who = _wf_client(req.user)
+    lf, who = _wf_client((req.user or "").strip() or (req.creator or "").strip() or None)
     ids = list(req.entry_ids) + ([req.entry_id] if req.entry_id else [])
     if not ids:
         raise HTTPException(400, "entry_id or entry_ids required")
