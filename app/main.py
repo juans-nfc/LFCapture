@@ -140,8 +140,20 @@ def _name_matches(name: str, catalog: list[dict]) -> tuple[str, list[str]]:
     base = re.sub(r"\.pdf$", "", (name or "").split(":", 1)[-1].strip(), flags=re.I)
     base = re.sub(r"\s*\[p[\d-]+\]$", "", base)   # strip split-part suffix
     sq = _squash(base)
-    hits = [t["name"] for t in catalog if len(_squash(t["name"])) >= 2 and _squash(t["name"]) in sq and not _is_generic(t["name"])]
-    hits.sort(key=lambda n: -len(_squash(n)))         # longest match first ("Emergency Contact Form" over "Contact")
+    segs = [_squash(x) for x in re.split(r"[-_ ,./]+", base) if len(_squash(x)) >= 2]   # "W4", "i9", "Emergency", ...
+    hits = []
+    for t in catalog:
+        tn = t["name"]
+        if _is_generic(tn):
+            continue
+        tsq = _squash(tn)
+        words = [_squash(w) for w in tn.split() if _squash(w)]          # "I-9 Employment" -> ["i9", "employment"]
+        if len(tsq) >= 2 and tsq in sq:                       # whole template name inside the file name
+            hits.append(tn)
+        elif any(seg == tsq or (len(seg) >= 2 and tsq.startswith(seg) and len(seg) >= min(4, len(tsq))) or (words and seg == words[0]) for seg in segs):
+            hits.append(tn)                                   # a name segment equals the template, its start, or its first word
+    exact = {n for n in hits if _squash(n) in segs}                      # a segment IS the template name
+    hits.sort(key=lambda n: (0 if n in exact else 1, -len(_squash(n))))   # exact first, then longest
     return base, hits
 
 
@@ -161,11 +173,11 @@ def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = 
     by_name = None
     base, hits = _name_matches(meta.get("source", ""), cat)
     if not forced and NAME_HINT_MODE == "force":
-        if hits and (len(hits) == 1 or len(_squash(hits[0])) > len(_squash(hits[1]))):   # an unambiguous best match
+        if hits and (len(hits) == 1 or _squash(hits[0]) in [_squash(x) for x in re.split(r"[-_ ,./]+", base)] or len(_squash(hits[0])) > len(_squash(hits[1]))):   # unambiguous: exact, or clearly longest
             by_name = hits[0]
             forced = by_name
             ctx += f"\nThe template is fixed to \"{by_name}\" because the file name names it; fill its fields."
-    logging.getLogger("lf-capture").info("name rule: name=%r matches=%s forced=%r mode=%s", base, hits, forced, NAME_HINT_MODE)
+    logging.getLogger("lf-capture").info("name rule: name=%r matches=%s forced=%r mode=%s (catalog: %d templates)", base, hits, forced, NAME_HINT_MODE, len(cat))
     result = extractor.extract((d / "doc.pdf").read_bytes(), cat, forced, ctx, lessons=_lessons_text(forced))
     if by_name:
         result["template"] = by_name

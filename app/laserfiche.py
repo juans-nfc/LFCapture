@@ -109,14 +109,30 @@ class LaserficheClient:
         return r.json() if r.content else None
 
     # ---- metadata catalog --------------------------------------------
+    def _all(self, path: str) -> list[dict]:
+        """GET a collection and follow @odata.nextLink until exhausted (the API pages large lists)."""
+        items: list[dict] = []
+        url = f"{self._repo_url}{path}"
+        while url:
+            r = self._http.get(url, headers=self._headers())
+            if r.status_code == 401:
+                self._token = None
+                r = self._http.get(url, headers=self._headers())
+            if r.status_code >= 400:
+                raise LaserficheError(f"GET {path} -> {r.status_code}: {r.text[:300]}")
+            data = r.json()
+            items.extend(data.get("value", []))
+            url = data.get("@odata.nextLink")
+        return items
+
     def templates(self) -> list[dict]:
         """All templates with their field definitions, shaped for the extractor."""
         allow = {t.strip() for t in os.environ.get("LF_TEMPLATE_ALLOWLIST", "").split(",") if t.strip()}
         out = []
-        for t in self._req("GET", "/TemplateDefinitions").get("value", []):
+        for t in self._all("/TemplateDefinitions"):
             if allow and t["name"] not in allow:
                 continue
-            fields = self._req("GET", f"/TemplateDefinitions/{t['id']}/FieldDefinitions").get("value", [])
+            fields = self._all(f"/TemplateDefinitions/{t['id']}/FieldDefinitions")
             out.append(
                 {
                     "id": t["id"],
@@ -223,8 +239,9 @@ class LaserficheClient:
     # ---- existing documents (backfill) --------------------------------
     _DOC_SELECT = "id,name,fullPath,folderPath,entryType,templateName,templateId,extension,mimeType,pageCount,isElectronicDocument"
 
-    def list_documents(self, folder_path: str, recursive: bool = False, only_no_template: bool = True, limit: int = 500) -> list[dict]:
-        """Documents under a folder (optionally recursive). Uses Folder/Children with OData paging."""
+    def list_documents(self, folder_path: str, recursive: bool = False, only_no_template: bool = True, limit: int = 500, generic: set[str] = frozenset()) -> list[dict]:
+        """Documents under a folder (optionally recursive). Uses Folder/Children with OData paging.
+        With only_no_template, documents whose template is a placeholder (generic) count as untemplated."""
         root_id = self.entry_id_by_path(folder_path)
         out: list[dict] = []
         pending = [root_id]
@@ -245,7 +262,8 @@ class LaserficheClient:
                         if recursive:
                             pending.append(e["id"])
                     elif e.get("entryType") == "Document":
-                        if only_no_template and (e.get("templateName") or e.get("templateId")):
+                        tn = (e.get("templateName") or "").strip().lower()
+                        if only_no_template and (tn or e.get("templateId")) and tn not in generic:
                             continue
                         out.append(e)
                 url, params = data.get("@odata.nextLink"), None
