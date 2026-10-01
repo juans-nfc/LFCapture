@@ -131,13 +131,21 @@ def _squash(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-def _name_hint(name: str, catalog: list[dict]) -> str:
-    """'Castaneda-Perez-Maybeth-W4' + template 'W4' -> a hint line; names here usually carry the document type."""
+NAME_HINT_MODE = os.environ.get("NAME_HINT_MODE", "force").lower()   # force = a template named in the file name is used; suggest = only a hint
+
+
+def _name_matches(name: str, catalog: list[dict]) -> tuple[str, list[str]]:
+    """'Castaneda-Perez-Maybeth-W4' + template 'W4' -> (base name, [matching template names, longest first])."""
     base = re.sub(r"\.pdf$", "", (name or "").split(":", 1)[-1].strip(), flags=re.I)
     base = re.sub(r"\s*\[p[\d-]+\]$", "", base)   # strip split-part suffix
     sq = _squash(base)
-    hits = [t["name"] for t in catalog if len(_squash(t["name"])) >= 2 and _squash(t["name"]) in sq]
+    hits = [t["name"] for t in catalog if len(_squash(t["name"])) >= 2 and _squash(t["name"]) in sq and not _is_generic(t["name"])]
     hits.sort(key=lambda n: -len(_squash(n)))         # longest match first ("Emergency Contact Form" over "Contact")
+    return base, hits
+
+
+def _name_hint(name: str, catalog: list[dict]) -> str:
+    base, hits = _name_matches(name, catalog)
     line = f"Document name: \"{base}\". File names here usually include the document type (e.g. '...-W4', '...-i9', '...-Emergency-Contact-Form'); treat the name as strong evidence for the template when it matches one."
     if hits:
         line += f" The name suggests template: {hits[0]}." + (f" (also possible: {', '.join(hits[1:3])})" if len(hits) > 1 else "")
@@ -149,7 +157,17 @@ def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = 
     meta = json.loads((d / "meta.json").read_text())
     cat = templates(lf)
     ctx = (meta.get("context", "") + "\n" + _name_hint(meta.get("source", ""), cat)).strip()
+    by_name = None
+    if not forced and NAME_HINT_MODE == "force":
+        _, hits = _name_matches(meta.get("source", ""), cat)
+        if hits and (len(hits) == 1 or len(_squash(hits[0])) > len(_squash(hits[1]))):   # an unambiguous best match
+            by_name = hits[0]
+            forced = by_name
+            ctx += f"\nThe template is fixed to \"{by_name}\" because the file name names it; fill its fields."
     result = extractor.extract((d / "doc.pdf").read_bytes(), cat, forced, ctx, lessons=_lessons_text(forced))
+    if by_name:
+        result["template"] = by_name
+        result["notes"] = (f"Template taken from the file name ({by_name}). " + (result.get("notes") or "")).strip()
     result["fields"] = _snap_values(result.get("template"), result.get("fields", {}), templates(lf))
     meta.update(result)
     (d / "meta.json").write_text(json.dumps(meta))
