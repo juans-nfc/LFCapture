@@ -756,7 +756,15 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
             if result.get("notes"):
                 note += f" | {result['notes']}"
             fields[NOTES_FIELD] = [note[:1000]]
-        lf.update_document(entry_id, template, fields, current_tpl)
+        try:
+            lf.update_document(entry_id, template, fields, current_tpl)
+        except LaserficheError as e:
+            if NOTES_FIELD and NOTES_FIELD in fields:
+                logging.getLogger("lf-capture").warning("field write with %s failed (%s); retrying without it — does that field exist in the repository?", NOTES_FIELD, e)
+                fields.pop(NOTES_FIELD, None)
+                lf.update_document(entry_id, template, fields, template)   # template already applied on the first attempt
+            else:
+                raise
         try:
             add = ([TAG_PROPOSED] if TAG_PROPOSED else []) + ([TAG_UNSURE] if unsure else [])
             lf.set_tags(entry_id, add=add, remove=[TAG_FAILED] + ([] if unsure else [TAG_UNSURE]))
