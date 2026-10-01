@@ -14,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
@@ -158,12 +159,13 @@ def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = 
     cat = templates(lf)
     ctx = (meta.get("context", "") + "\n" + _name_hint(meta.get("source", ""), cat)).strip()
     by_name = None
+    base, hits = _name_matches(meta.get("source", ""), cat)
     if not forced and NAME_HINT_MODE == "force":
-        _, hits = _name_matches(meta.get("source", ""), cat)
         if hits and (len(hits) == 1 or len(_squash(hits[0])) > len(_squash(hits[1]))):   # an unambiguous best match
             by_name = hits[0]
             forced = by_name
             ctx += f"\nThe template is fixed to \"{by_name}\" because the file name names it; fill its fields."
+    logging.getLogger("lf-capture").info("name rule: name=%r matches=%s forced=%r mode=%s", base, hits, forced, NAME_HINT_MODE)
     result = extractor.extract((d / "doc.pdf").read_bytes(), cat, forced, ctx, lessons=_lessons_text(forced))
     if by_name:
         result["template"] = by_name
