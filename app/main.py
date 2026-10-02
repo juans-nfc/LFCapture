@@ -119,6 +119,24 @@ def _nums(s: str) -> set[int]:
     return {int(x) for x in re.findall(r"\d+", s or "")}
 
 
+_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%m-%d-%y", "%Y/%m/%d", "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y", "%Y%m%d")
+
+
+def _to_iso_date(v: str) -> str | None:
+    """Anything a document might print -> YYYY-MM-DD; a bare year -> YYYY-01-01. None if unparseable."""
+    from datetime import datetime
+    t = str(v).strip()
+    if re.fullmatch(r"\d{4}", t):
+        return f"{t}-01-01"
+    t2 = t.split("T")[0].split(" ")[0] if re.match(r"\d{4}-\d{2}-\d{2}", t) else t
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(t2, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
 def _snap_values(template: str | None, fields: dict[str, list[str]], catalog: list[dict]) -> dict[str, list[str]]:
     """Make proposed values match what Laserfiche will accept: aliases first, then fixed list values.
     For numbered list values, a proposed value whose number matches a *different* list entry is re-pointed by number."""
@@ -129,8 +147,15 @@ def _snap_values(template: str | None, fields: dict[str, list[str]], catalog: li
         fdef = next((f for f in (tdef["fields"] if tdef else []) if f["name"] == name), None)
         amap = {**aliases.get("*", {}), **aliases.get(name, {})}
         allowed = (fdef or {}).get("list") or []
+        ftype = (fdef or {}).get("type") or ""
         snapped = []
         for v in vals:
+            if ftype in ("Date", "DateTime"):
+                iso = _to_iso_date(v)
+                if iso is None:
+                    logging.getLogger("lf-capture").warning("dropping unparseable date %r for %s", v, name)
+                    continue
+                v = iso if ftype == "Date" else iso + "T00:00:00"
             key = str(v).strip().lower()
             if key in amap:
                 v = amap[key]
@@ -1019,7 +1044,7 @@ def _backfill_worker():
             _bf_state["errors"].append(f"{item[1]}: {e}")
             if item[0] == "lf":
                 _bf_seen.discard(item[1])
-            else:  # leave a reviewable stub so the upload isn't silently lost
+            elif item[0] == "job":  # leave a reviewable stub so the upload isn't silently lost
                 mp = WORK / item[1] / "meta.json"
                 if mp.exists():
                     mm = json.loads(mp.read_text()); mm.update({"template": None, "fields": {}, "confidence": 0, "summary": "", "suggested_filename": "", "notes": f"Automatic read failed: {e}"}); _write_meta(mp, mm)
