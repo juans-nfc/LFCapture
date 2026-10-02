@@ -99,12 +99,24 @@ class LaserficheClient:
             self._login()
         return {"Authorization": f"Bearer {self._token}"}
 
+    LOCK_WAITS = (5, 15, 30)   # seconds between retries when an entry is locked (someone has it open / another workflow)
+
     def _req(self, method: str, path: str, retry: bool = True, **kw) -> Any:
         r = self._http.request(method, f"{self._repo_url}{path}", headers=self._headers(), **kw)
         if r.status_code == 401 and retry:
             self._token = None
             return self._req(method, path, retry=False, **kw)
+        if r.status_code == 423 and method in ("PUT", "POST", "DELETE"):
+            for wait in self.LOCK_WAITS:
+                time.sleep(wait)
+                r = self._http.request(method, f"{self._repo_url}{path}", headers=self._headers(), **kw)
+                if r.status_code != 423:
+                    break
+            if r.status_code == 423:
+                raise LaserficheError(f"{method} {path}: entry is locked (open in a client or held by another workflow) — tried for {sum(self.LOCK_WAITS)}s")
         if r.status_code >= 400:
+            if r.status_code == 500 and "no image pages" in r.text:
+                raise LaserficheError("document has no pages and no PDF to read (empty, or a non-PDF electronic file)")
             raise LaserficheError(f"{method} {path} -> {r.status_code}: {r.text[:500]}")
         return r.json() if r.content else None
 
@@ -330,10 +342,31 @@ class LaserficheClient:
         if wanted != sorted(current):
             self._req("PUT", f"/Entries/{entry_id}/Tags", json={"tags": wanted})
 
-    def update_document(self, entry_id: int, template: str, fields: dict[str, list[str]], current_template: str | None) -> None:
+    def set_fields_tolerant(self, entry_id: int, fields: dict[str, list[str]]) -> list[str]:
+        """Write all fields; if Laserfiche rejects the set, find the offending ones field by field and keep the rest.
+        Returns the names of fields that were refused."""
+        try:
+            self.set_fields(entry_id, fields)
+            return []
+        except LaserficheError as first:
+            logging.getLogger("lf-capture").warning("field write rejected for %s (%s); retrying field by field", entry_id, first)
+        accepted: dict[str, list[str]] = {}
+        refused: list[str] = []
+        for name, vals in fields.items():
+            trial = {**accepted, name: vals}
+            try:
+                self.set_fields(entry_id, trial)
+                accepted = trial
+            except LaserficheError as e:
+                refused.append(name)
+                logging.getLogger("lf-capture").warning("field %r refused on %s: %s", name, entry_id, str(e)[:200])
+        return refused
+
+    def update_document(self, entry_id: int, template: str, fields: dict[str, list[str]], current_template: str | None) -> list[str]:
+        """Set template (if changed) and fields. Returns names of fields Laserfiche refused (empty when all went in)."""
         if template != (current_template or ""):
             self.set_template(entry_id, template)
-        self.set_fields(entry_id, fields)
+        return self.set_fields_tolerant(entry_id, fields)
 
     def list_folders(self, folder_path: str) -> dict:
         """Subfolders (and a document count) of one folder, for the folder browser. Root is "\\"."""

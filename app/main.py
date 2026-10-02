@@ -444,8 +444,10 @@ def _save(job_id: str, template: str, fields: dict[str, list[str]], filename: st
     meta = json.loads((d / "meta.json").read_text())
     if meta.get("lf_entry_id"):
         entry_id = int(meta["lf_entry_id"])
-        lf.update_document(entry_id, template, fields, meta.get("lf_template"))
+        refused = lf.update_document(entry_id, template, fields, meta.get("lf_template"))
         _bf_seen.discard(entry_id)
+        if refused:
+            raise HTTPException(400, "Saved, but Laserfiche refused these fields (check the values): " + ", ".join(refused))
     else:
         try:
             parent = folder_entry_id(lf, folder)
@@ -808,6 +810,15 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
             for f in tdef["fields"]:
                 if f.get("length") and fields.get(f["name"]):
                     fields[f["name"]] = [v[: f["length"]] for v in fields[f["name"]]]
+        # dropdown values must be in the list; drop anything that is not rather than sink the whole write
+        if tdef:
+            for f in tdef["fields"]:
+                if f.get("list") and fields.get(f["name"]):
+                    ok = [v for v in fields[f["name"]] if v in f["list"]]
+                    if len(ok) != len(fields[f["name"]]):
+                        logging.getLogger("lf-capture").warning("%s: dropping %s value(s) not in list: %s", entry_id, f["name"], [v for v in fields[f["name"]] if v not in f["list"]])
+                        result["notes"] = (f"{f['name']}: proposed value not in the list, left blank. " + (result.get("notes") or "")).strip()
+                    fields[f["name"]] = ok
         unsure = result["confidence"] < DIRECT_UNSURE_BELOW
         if NOTES_FIELD:
             note = f"{template} · {round(result['confidence'] * 100)}% confident" + (" · UNSURE" if unsure else "")
@@ -816,15 +827,16 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
             if result.get("notes"):
                 note += f" | {result['notes']}"
             fields[NOTES_FIELD] = [note[:1000]]
-        try:
-            lf.update_document(entry_id, template, fields, current_tpl)
-        except LaserficheError as e:
-            if NOTES_FIELD and NOTES_FIELD in fields:
-                logging.getLogger("lf-capture").warning("field write with %s failed (%s); retrying without it — does that field exist in the repository?", NOTES_FIELD, e)
-                fields.pop(NOTES_FIELD, None)
-                lf.update_document(entry_id, template, fields, template)   # template already applied on the first attempt
-            else:
-                raise
+        refused = lf.update_document(entry_id, template, fields, current_tpl)
+        if refused:
+            msg = "Laserfiche refused: " + ", ".join(refused)
+            logging.getLogger("lf-capture").warning("%s: %s", entry_id, msg)
+            if NOTES_FIELD and NOTES_FIELD not in refused:
+                fields[NOTES_FIELD] = [(fields.get(NOTES_FIELD, [""])[0] + " | " + msg)[:1000]]
+                try:
+                    lf.set_fields(entry_id, {k: v for k, v in fields.items() if k not in refused})
+                except LaserficheError:
+                    pass
         try:
             add = ([TAG_PROPOSED] if TAG_PROPOSED else []) + ([TAG_UNSURE] if unsure else [])
             lf.set_tags(entry_id, add=add, remove=[TAG_FAILED] + ([] if unsure else [TAG_UNSURE]))
