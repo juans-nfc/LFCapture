@@ -115,8 +115,13 @@ def _aliases() -> dict:
     return {field: {str(k).strip().lower(): v for k, v in mapping.items()} for field, mapping in raw.items()}
 
 
+def _nums(s: str) -> set[int]:
+    return {int(x) for x in re.findall(r"\d+", s or "")}
+
+
 def _snap_values(template: str | None, fields: dict[str, list[str]], catalog: list[dict]) -> dict[str, list[str]]:
-    """Make proposed values match what Laserfiche will accept: aliases first, then fixed list values."""
+    """Make proposed values match what Laserfiche will accept: aliases first, then fixed list values.
+    For numbered list values, a proposed value whose number matches a *different* list entry is re-pointed by number."""
     tdef = next((t for t in catalog if t["name"] == template), None)
     aliases = _aliases()
     out = {}
@@ -132,6 +137,13 @@ def _snap_values(template: str | None, fields: dict[str, list[str]], catalog: li
             if allowed:
                 exact = next((a for a in allowed if a.strip().lower() == str(v).strip().lower()), None)
                 if exact:
+                    # numbered lists: if the proposed value's own number points at a different single entry, prefer that
+                    pn = _nums(str(v))
+                    if pn and any(_nums(a) for a in allowed):
+                        by_num = [a for a in allowed if _nums(a) & pn]
+                        if len(by_num) == 1 and by_num[0] != exact:
+                            logging.getLogger("lf-capture").info("list snap by number: %r -> %r", v, by_num[0])
+                            exact = by_num[0]
                     v = exact
                 else:
                     close = [a for a in allowed if str(v).strip().lower().startswith(a.strip().lower()) or a.strip().lower().startswith(str(v).strip().lower())]
