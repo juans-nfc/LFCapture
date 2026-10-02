@@ -5,7 +5,6 @@ import logging
 import os
 import shutil
 import queue
-import re
 import threading
 import time
 import uuid
@@ -14,7 +13,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
@@ -24,6 +22,7 @@ from pydantic import BaseModel  # noqa: E402
 from . import extractor, mailbox  # noqa: E402
 from .laserfiche import LaserficheClient, LaserficheError  # noqa: E402
 from . import users  # noqa: E402
+from . import as400  # noqa: E402
 
 INBOX = Path(os.environ.get("INBOX_DIR", "./inbox"))
 WORK = Path(os.environ.get("WORK_DIR", "./work"))
@@ -128,60 +127,10 @@ def _snap_values(template: str | None, fields: dict[str, list[str]], catalog: li
     return out
 
 
-def _squash(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
-
-
-NAME_HINT_MODE = os.environ.get("NAME_HINT_MODE", "force").lower()   # force = a template named in the file name is used; suggest = only a hint
-
-
-def _name_matches(name: str, catalog: list[dict]) -> tuple[str, list[str]]:
-    """'Castaneda-Perez-Maybeth-W4' + template 'W4' -> (base name, [matching template names, longest first])."""
-    base = re.sub(r"\.pdf$", "", (name or "").split(":", 1)[-1].strip(), flags=re.I)
-    base = re.sub(r"\s*\[p[\d-]+\]$", "", base)   # strip split-part suffix
-    sq = _squash(base)
-    segs = [_squash(x) for x in re.split(r"[-_ ,./]+", base) if len(_squash(x)) >= 2]   # "W4", "i9", "Emergency", ...
-    hits = []
-    for t in catalog:
-        tn = t["name"]
-        if _is_generic(tn):
-            continue
-        tsq = _squash(tn)
-        words = [_squash(w) for w in tn.split() if _squash(w)]          # "I-9 Employment" -> ["i9", "employment"]
-        if len(tsq) >= 2 and tsq in sq:                       # whole template name inside the file name
-            hits.append(tn)
-        elif any(seg == tsq or (len(seg) >= 2 and tsq.startswith(seg) and len(seg) >= min(4, len(tsq))) or (words and seg == words[0]) for seg in segs):
-            hits.append(tn)                                   # a name segment equals the template, its start, or its first word
-    exact = {n for n in hits if _squash(n) in segs}                      # a segment IS the template name
-    hits.sort(key=lambda n: (0 if n in exact else 1, -len(_squash(n))))   # exact first, then longest
-    return base, hits
-
-
-def _name_hint(name: str, catalog: list[dict]) -> str:
-    base, hits = _name_matches(name, catalog)
-    line = f"Document name: \"{base}\". File names here usually include the document type (e.g. '...-W4', '...-i9', '...-Emergency-Contact-Form'); treat the name as strong evidence for the template when it matches one."
-    if hits:
-        line += f" The name suggests template: {hits[0]}." + (f" (also possible: {', '.join(hits[1:3])})" if len(hits) > 1 else "")
-    return line
-
-
 def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = None) -> dict:
     d = _job_dir(job_id)
     meta = json.loads((d / "meta.json").read_text())
-    cat = templates(lf)
-    ctx = (meta.get("context", "") + "\n" + _name_hint(meta.get("source", ""), cat)).strip()
-    by_name = None
-    base, hits = _name_matches(meta.get("source", ""), cat)
-    if not forced and NAME_HINT_MODE == "force":
-        if hits and (len(hits) == 1 or _squash(hits[0]) in [_squash(x) for x in re.split(r"[-_ ,./]+", base)] or len(_squash(hits[0])) > len(_squash(hits[1]))):   # unambiguous: exact, or clearly longest
-            by_name = hits[0]
-            forced = by_name
-            ctx += f"\nThe template is fixed to \"{by_name}\" because the file name names it; fill its fields."
-    logging.getLogger("lf-capture").info("name rule: name=%r matches=%s forced=%r mode=%s (catalog: %d templates)", base, hits, forced, NAME_HINT_MODE, len(cat))
-    result = extractor.extract((d / "doc.pdf").read_bytes(), cat, forced, ctx, lessons=_lessons_text(forced))
-    if by_name:
-        result["template"] = by_name
-        result["notes"] = (f"Template taken from the file name ({by_name}). " + (result.get("notes") or "")).strip()
+    result = extractor.extract((d / "doc.pdf").read_bytes(), templates(lf), forced, meta.get("context", ""), lessons=_lessons_text(forced))
     result["fields"] = _snap_values(result.get("template"), result.get("fields", {}), templates(lf))
     meta.update(result)
     (d / "meta.json").write_text(json.dumps(meta))
@@ -579,16 +528,6 @@ TAG_PROPOSED = os.environ.get("LF_TAG_PROPOSED", "")   # blank = don't tag succe
 TAG_UNSURE = os.environ.get("LF_TAG_UNSURE", "AI-Unsure")
 TAG_FAILED = os.environ.get("LF_TAG_FAILED", "AI-Failed")
 DIRECT_UNSURE_BELOW = float(os.environ.get("DIRECT_UNSURE_BELOW", "0.8"))
-# Templates that are placeholders (e.g. what the e-mail archive agent stamps on everything): treated as "no template yet"
-GENERIC_TEMPLATES = {t.strip().lower() for t in os.environ.get("LF_GENERIC_TEMPLATES", "Misc. Document").split(",") if t.strip()}
-# Optional: a field (defined in the repository, need not be on the template) that receives Claude's summary/confidence/notes
-NOTES_FIELD = os.environ.get("LF_NOTES_FIELD", "").strip()
-# Fields the unattended (workflow) flow never fills by itself — it only keeps a value that was already there
-DIRECT_SKIP_FIELDS = {f.strip().lower() for f in os.environ.get("DIRECT_SKIP_FIELDS", "").split(",") if f.strip()}
-
-
-def _is_generic(template: str | None) -> bool:
-    return bool(template) and template.strip().lower() in GENERIC_TEMPLATES
 
 
 class LfReadRequest(BaseModel):
@@ -683,58 +622,6 @@ def _notify_failure(who: str, entry: dict, error: str) -> None:
         logging.getLogger("lf-capture").warning("failure e-mail to %s not sent: %s", to, ex)
 
 
-class LfLearnRequest(BaseModel):
-    entry_ids: list[int] = []
-    entry_id: int | None = None
-    token: str | None = None
-    user: str | None = None
-
-
-def _last_ai_write(entry_id: int) -> dict | None:
-    if not ACTIVITY.exists():
-        return None
-    for l in reversed(ACTIVITY.read_text().splitlines()):
-        if not l.strip():
-            continue
-        r = json.loads(l)
-        if r.get("kind") == "lf_direct" and r.get("entry_id") == entry_id and "ai_fields" in r:
-            return r
-    return None
-
-
-@app.post("/api/lf/learn")
-async def api_lf_learn(request: Request):
-    """Workflow 'Learn from this document': compare what a human left on the entry with what the tool wrote, record the differences as lessons."""
-    try:
-        req = LfLearnRequest(**_lenient_json(await request.body()))
-    except Exception as e:
-        raise HTTPException(422, f"Could not read request body: {e}")
-    auth = request.headers.get("authorization", "")
-    if not WF_TOKEN or (auth != f"Bearer {WF_TOKEN}" and (req.token or "") != WF_TOKEN):
-        raise HTTPException(401, "bad or missing LF_WORKFLOW_TOKEN")
-    lf, who = _wf_client((req.user or "").strip() or None)
-    ids = list(req.entry_ids) + ([req.entry_id] if req.entry_id else [])
-    learned, skipped = 0, []
-    for eid in ids:
-        prior = _last_ai_write(eid)
-        if not prior:
-            skipped.append({"entry_id": eid, "reason": "no AI write on record for this entry"})
-            continue
-        entry = lf.get_entry(eid)
-        now_fields = {k: v for k, v in lf.entry_fields(eid).items() if k != NOTES_FIELD}
-        now_tpl = entry.get("templateName") or ""
-        before = len(_load_corrections(100000))
-        _record_corrections({"template": prior["ai_template"], "fields": prior["ai_fields"], "source": entry.get("name")}, now_tpl, now_fields, who)
-        n = len(_load_corrections(100000)) - before
-        learned += n
-        try:
-            lf.set_tags(eid, remove=[TAG_UNSURE, TAG_FAILED])   # a human has looked at it
-        except LaserficheError:
-            pass
-        _log_activity(who, kind="lf_learn", source=entry.get("name"), entry_id=eid, template=now_tpl, corrections=n)
-    return {"learned": learned, "entries": len(ids), "skipped": skipped}
-
-
 def _direct_one(entry_id: int, who: str, mode: str) -> None:
     """Read one existing entry and write the result straight back into Laserfiche, tagged for human review."""
     lf = _svc if who == "service" else users.client_for(who)
@@ -744,12 +631,9 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
     pdf = lf.export_pdf(entry_id, entry)
     existing = lf.entry_fields(entry_id)
     current_tpl = entry.get("templateName") or None
-    generic = _is_generic(current_tpl)
-    if mode == "overwrite" or not current_tpl or generic:
-        ctx = (f"This document is already in Laserfiche at: {entry.get('fullPath')}\n"
-               + (f"It carries the placeholder template '{current_tpl}' (assigned automatically on import, not a real classification); choose the correct template from the document.\n" if generic
-                  else f"Currently filed under template: {current_tpl or 'none'} — may be wrong; choose from the document.\n")
-               + f"Existing field values (may be wrong): {json.dumps(existing) if existing else 'none'}")
+    if mode == "overwrite" or not current_tpl:
+        ctx = (f"This document is already in Laserfiche at: {entry.get('fullPath')}\nCurrently filed under template: {current_tpl or 'none'} — may be wrong; choose from the document.\n"
+               f"Existing field values (may be wrong): {json.dumps(existing) if existing else 'none'}")
         forced = None
     else:
         ctx = (f"This document is already in Laserfiche at: {entry.get('fullPath')}\nCurrent template: {current_tpl}\n"
@@ -759,52 +643,26 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
     try:
         result = _run_extract(job_id, forced, lf)
         fields = result["fields"]
+        if mode != "overwrite" and current_tpl:
+            fields = {**fields, **{k: v for k, v in existing.items() if v}}
         template = result.get("template") or current_tpl
         if not template:
             raise RuntimeError("no template could be determined")
-        tdef = next((t for t in templates(lf) if t["name"] == template), None)
-        tnames = {f["name"] for f in tdef["fields"]} if tdef else set(fields)
-        if mode != "overwrite" and current_tpl and not generic:
-            fields = {**fields, **{k: v for k, v in existing.items() if v}}          # keep: existing values win
-        else:
-            # re-classified: carry over existing values only where the new template has that field and Claude left it empty
-            for k, v in existing.items():
-                if v and k in tnames and not fields.get(k):
-                    fields[k] = v
-        # unattended: never invent values for fields on the skip list
-        for k in list(fields):
-            if k.lower() in DIRECT_SKIP_FIELDS and not existing.get(k):
-                fields.pop(k)
         # respect field lengths so the write cannot fail on that
+        tdef = next((t for t in templates(lf) if t["name"] == template), None)
         if tdef:
             for f in tdef["fields"]:
                 if f.get("length") and fields.get(f["name"]):
                     fields[f["name"]] = [v[: f["length"]] for v in fields[f["name"]]]
+        lf.update_document(entry_id, template, fields, current_tpl)
         unsure = result["confidence"] < DIRECT_UNSURE_BELOW
-        if NOTES_FIELD:
-            note = f"{template} · {round(result['confidence'] * 100)}% confident" + (" · UNSURE" if unsure else "")
-            if result.get("summary"):
-                note += f" — {result['summary']}"
-            if result.get("notes"):
-                note += f" | {result['notes']}"
-            fields[NOTES_FIELD] = [note[:1000]]
-        try:
-            lf.update_document(entry_id, template, fields, current_tpl)
-        except LaserficheError as e:
-            if NOTES_FIELD and NOTES_FIELD in fields:
-                logging.getLogger("lf-capture").warning("field write with %s failed (%s); retrying without it — does that field exist in the repository?", NOTES_FIELD, e)
-                fields.pop(NOTES_FIELD, None)
-                lf.update_document(entry_id, template, fields, template)   # template already applied on the first attempt
-            else:
-                raise
         try:
             add = ([TAG_PROPOSED] if TAG_PROPOSED else []) + ([TAG_UNSURE] if unsure else [])
             lf.set_tags(entry_id, add=add, remove=[TAG_FAILED] + ([] if unsure else [TAG_UNSURE]))
         except LaserficheError as e:
             logging.getLogger("lf-capture").warning("tagging %s failed (do the tags exist in the repository?): %s", entry_id, e)
         _log_activity(who, kind="lf_direct", source=entry.get("name"), template=template, entry_id=entry_id, folder=entry.get("fullPath"),
-                      confidence=result["confidence"], name=entry.get("name"), notes=result.get("notes", ""),
-                      ai_template=template, ai_fields={k: v for k, v in fields.items() if k != NOTES_FIELD})
+                      confidence=result["confidence"], name=entry.get("name"), notes=result.get("notes", ""))
     except Exception as e:
         try:
             lf.set_tags(entry_id, add=[TAG_FAILED])
@@ -833,7 +691,7 @@ class ScanRequest(BaseModel):
 @app.post("/api/backfill/scan")
 def api_backfill_scan(req: ScanRequest, lf: LaserficheClient = Depends(users.lf_for)):
     try:
-        docs = lf.list_documents(req.folder, req.recursive, req.only_no_template, req.limit, generic=GENERIC_TEMPLATES)
+        docs = lf.list_documents(req.folder, req.recursive, req.only_no_template, req.limit)
     except LaserficheError as e:
         raise HTTPException(502, str(e))
     return {"count": len(docs), "documents": [
@@ -881,12 +739,10 @@ def _backfill_one(entry_id: int, email: str, mode: str = "keep") -> None:
     pdf = lf.export_pdf(entry_id, entry)
     existing = lf.entry_fields(entry_id)
     current_tpl = entry.get("templateName") or None
-    generic = _is_generic(current_tpl)
-    if mode == "overwrite" or not current_tpl or generic:
+    if mode == "overwrite" or not current_tpl:
         ctx = (f"This document is ALREADY in Laserfiche at: {entry.get('fullPath')}\n"
-               + (f"It carries the placeholder template '{current_tpl}' (assigned automatically on import, not a real classification); choose the correct template from the document itself.\n" if generic
-                  else f"It is currently filed under template: {current_tpl or 'none'} — this MAY be wrong; choose the correct template from the document itself.\n")
-               + f"Existing field values (may be wrong or outdated; read the document and give the correct values): "
+               f"It is currently filed under template: {current_tpl or 'none'} — this MAY be wrong; choose the correct template from the document itself.\n"
+               f"Existing field values (may be wrong or outdated; read the document and give the correct values): "
                f"{json.dumps(existing) if existing else 'none'}")
         forced = None
     else:
@@ -901,7 +757,7 @@ def _backfill_one(entry_id: int, email: str, mode: str = "keep") -> None:
                              "lf_template": current_tpl, "lf_fields": existing, "owner": email, "mode": mode}))
     try:
         result = _run_extract(job_id, forced, lf)
-        if mode != "overwrite" and current_tpl and not generic:
+        if mode != "overwrite" and current_tpl:
             # keep mode: values already in Laserfiche win; Claude only supplies the blanks
             merged = {**result["fields"], **{k: v for k, v in existing.items() if v}}
             meta = json.loads(m.read_text()); meta["fields"] = merged; m.write_text(json.dumps(meta))
@@ -1009,5 +865,9 @@ def _start_mail():
     for i in range(int(os.environ.get("BACKFILL_WORKERS", "3"))):
         threading.Thread(target=_backfill_worker, daemon=True, name=f"backfill-{i}").start()
 
+
+# AS400 → Laserfiche metadata bridge (see docs-fill-from-as400.md)
+as400.install(app, wf_token=WF_TOKEN, wf_client=_wf_client, lenient_json=_lenient_json,
+              templates=templates, log_activity=_log_activity, tag_failed=TAG_FAILED)
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
