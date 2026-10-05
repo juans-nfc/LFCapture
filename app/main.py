@@ -119,6 +119,34 @@ def _nums(s: str) -> set[int]:
     return {int(x) for x in re.findall(r"\d+", s or "")}
 
 
+_NAME_NOISE = {"co", "company", "inc", "llc", "ltd", "corp", "the", "and", "of", "mr", "mrs", "ms"}
+
+
+def _name_tokens(s: str) -> set[str]:
+    """'Sanchez, Javier' / 'JAVIER SANCHEZ' / 'J. Sanchez' -> comparable tokens (initials kept as single letters)."""
+    return {t.strip(".") for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t.strip(".") and t.strip(".") not in _NAME_NOISE}
+
+
+def _match_by_name(v: str, allowed: list[str]) -> str | None:
+    """Snap a proposed name to the single list entry naming the same person/company."""
+    pt = _name_tokens(v)
+    if not pt:
+        return None
+    scored = []
+    for a in allowed:
+        at = _name_tokens(a)
+        if not at:
+            continue
+        full = {t for t in at if len(t) > 1}; pfull = {t for t in pt if len(t) > 1}
+        if pfull and full and (pfull <= at or full <= pt):              # all full words of one side appear in the other
+            scored.append(a)
+        elif pfull and full and len(pfull & full) >= 2:                  # first + last both present, order/extra words ignored
+            scored.append(a)
+        elif len(pfull & full) == 1 and (pt - pfull) and any(t[0] in {x[0] for x in full - pfull} for t in pt - pfull):
+            scored.append(a)                                             # surname + matching initial
+    return scored[0] if len(scored) == 1 else None
+
+
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%m-%d-%y", "%Y/%m/%d", "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y", "%Y%m%d")
 
 
@@ -174,6 +202,11 @@ def _snap_values(template: str | None, fields: dict[str, list[str]], catalog: li
                     close = [a for a in allowed if str(v).strip().lower().startswith(a.strip().lower()) or a.strip().lower().startswith(str(v).strip().lower())]
                     if len(close) == 1:
                         v = close[0]
+                    elif not any(_nums(a) for a in allowed):              # name-style lists: same person, different formatting
+                        byname = _match_by_name(str(v), allowed)
+                        if byname:
+                            logging.getLogger("lf-capture").info("list snap by name: %r -> %r", v, byname)
+                            v = byname
             snapped.append(v)
         out[name] = snapped
     return out
