@@ -271,8 +271,8 @@ def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = 
             forced = by_name
             ctx += f"\nThe template is fixed to \"{by_name}\" because the file name names it; fill its fields."
     logging.getLogger("lf-capture").info("name rule: name=%r matches=%s forced=%r mode=%s (catalog: %d templates)", base, hits, forced, NAME_HINT_MODE, len(cat))
-    logging.getLogger("lf-capture").info("proposed: template=%r confidence=%.2f fields=%s notes=%r", result.get("template"), result.get("confidence", 0), json.dumps(result.get("fields"))[:600], (result.get("notes") or "")[:200])
     result = extractor.extract((d / "doc.pdf").read_bytes(), cat, forced, ctx, lessons=_lessons_text(forced))
+    logging.getLogger("lf-capture").info("proposed: template=%r confidence=%.2f fields=%s notes=%r", result.get("template"), result.get("confidence", 0), json.dumps(result.get("fields"))[:600], (result.get("notes") or "")[:200])
     if by_name:
         result["template"] = by_name
         result["notes"] = (f"Template taken from the file name ({by_name}). " + (result.get("notes") or "")).strip()
@@ -1071,6 +1071,7 @@ def _process_upload(job_id: str, user: str) -> None:
 def _backfill_worker():
     while True:
         item = _bf_queue.get()
+        logging.getLogger("lf-capture").info("reading %s %s (pending after this: %d)", item[0], item[1], _bf_queue.qsize())
         try:
             if item[0] == "job":
                 _, job_id, user = item
@@ -1085,6 +1086,7 @@ def _backfill_worker():
         except Exception as e:
             _bf_state["failed"] += 1
             _bf_state["errors"].append(f"{item[1]}: {e}")
+            logging.getLogger("lf-capture").error("read failed for %s %s: %s", item[0], item[1], e, exc_info=not isinstance(e, (LaserficheError, HTTPException)))
             if item[0] == "lf":
                 _bf_seen.discard(item[1])
             elif item[0] == "job":  # leave a reviewable stub so the upload isn't silently lost
