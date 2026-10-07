@@ -219,8 +219,10 @@ def _squash(s: str) -> str:
 NAME_HINT_MODE = os.environ.get("NAME_HINT_MODE", "force").lower()   # force = a template named in the file name is used; suggest = only a hint
 
 
-def _name_matches(name: str, catalog: list[dict]) -> tuple[str, list[str]]:
-    """'Castaneda-Perez-Maybeth-W4' + template 'W4' -> (base name, [matching template names, longest first])."""
+def _name_matches(name: str, catalog: list[dict], weak: list[str] | None = None) -> tuple[str, list[str]]:
+    """'Castaneda-Perez-Maybeth-W4' + template 'W4' -> (base name, [strong matches, longest first]).
+    Strong = the whole template name, or a code-like segment (W4, i9, 401k). If `weak` is given, plain-word
+    first-word matches ("Loading" -> "Loading Order") are appended to it: a hint for Claude, never forced."""
     base = re.sub(r"\.pdf$", "", (name or "").split(":", 1)[-1].strip(), flags=re.I)
     base = re.sub(r"\s*\[p[\d-]+\]$", "", base)   # strip split-part suffix
     sq = _squash(base)
@@ -232,20 +234,27 @@ def _name_matches(name: str, catalog: list[dict]) -> tuple[str, list[str]]:
             continue
         tsq = _squash(tn)
         words = [_squash(w) for w in tn.split() if _squash(w)]          # "I-9 Employment" -> ["i9", "employment"]
-        if len(tsq) >= 2 and tsq in sq:                       # whole template name inside the file name
+        runs = {"".join(segs[i:j]) for i in range(len(segs)) for j in range(i + 1, len(segs) + 1)}   # consecutive segment runs
+        code_segs = [seg for seg in segs if any(ch.isdigit() for ch in seg)]                               # W4, i9, 401k, 205 — not plain words
+        if len(tsq) >= 2 and tsq in runs:                      # whole template name made of whole name segments ("Emergency Contact Form")
             hits.append(tn)
-        elif any(seg == tsq or (len(seg) >= 2 and tsq.startswith(seg) and len(seg) >= min(4, len(tsq))) or (words and seg == words[0]) for seg in segs):
-            hits.append(tn)                                   # a name segment equals the template, its start, or its first word
+        elif any(seg == tsq or tsq.startswith(seg) or (words and seg == words[0]) for seg in code_segs):
+            hits.append(tn)                                   # a CODE segment equals the template, its start, or its first word ("W4" -> "W4 Form")
+        elif weak is not None and words and len(words) > 1 and any(seg == words[0] and len(seg) >= 5 for seg in segs):
+            weak.append(tn)                                   # plain word matching a multi-word template's first word: suggest only
     exact = {n for n in hits if _squash(n) in segs}                      # a segment IS the template name
     hits.sort(key=lambda n: (0 if n in exact else 1, -len(_squash(n))))   # exact first, then longest
     return base, hits
 
 
 def _name_hint(name: str, catalog: list[dict]) -> str:
-    base, hits = _name_matches(name, catalog)
+    weak: list[str] = []
+    base, hits = _name_matches(name, catalog, weak)
     line = f"Document name: \"{base}\". File names here usually include the document type (e.g. '...-W4', '...-i9', '...-Emergency-Contact-Form'); treat the name as strong evidence for the template when it matches one."
     if hits:
         line += f" The name suggests template: {hits[0]}." + (f" (also possible: {', '.join(hits[1:3])})" if len(hits) > 1 else "")
+    elif weak:
+        line += f" A word in the name resembles the template \"{weak[0]}\" — use that only if the document's content agrees; otherwise ignore it."
     return line
 
 
@@ -262,6 +271,7 @@ def _run_extract(job_id: str, forced: str | None, lf: LaserficheClient | None = 
             forced = by_name
             ctx += f"\nThe template is fixed to \"{by_name}\" because the file name names it; fill its fields."
     logging.getLogger("lf-capture").info("name rule: name=%r matches=%s forced=%r mode=%s (catalog: %d templates)", base, hits, forced, NAME_HINT_MODE, len(cat))
+    logging.getLogger("lf-capture").info("proposed: template=%r confidence=%.2f fields=%s notes=%r", result.get("template"), result.get("confidence", 0), json.dumps(result.get("fields"))[:600], (result.get("notes") or "")[:200])
     result = extractor.extract((d / "doc.pdf").read_bytes(), cat, forced, ctx, lessons=_lessons_text(forced))
     if by_name:
         result["template"] = by_name

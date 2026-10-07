@@ -33,10 +33,14 @@ def _field_schema(f: dict) -> dict:
     if f.get("length"):
         desc += f". Max {f['length']} characters — shorten or abbreviate if needed."
     if f["list"]:
-        desc += ". Allowed: " + ", ".join(f["list"]) + ". Leave OUT unless one of these values is actually printed on the document."
-        if not any(any(ch.isdigit() for ch in v) for v in f["list"]):
-            desc += (" If this is a list of people or companies, pick the entry that is the SAME person/company as printed, even when the "
-                     "formatting differs (case, 'Last, First' order, initials, 'Co.' vs 'Company').")
+        desc += ". Allowed: " + ", ".join(f["list"]) + "."
+        looks_like_names = not any(any(ch.isdigit() for ch in v) for v in f["list"]) and all(len(v.split()) >= 2 for v in f["list"] if v.strip())
+        if looks_like_names:
+            desc += (" This is a list of people/companies: if the document names one of them in ANY formatting (ALL CAPS, 'Last, First', "
+                     "initials, 'Co.' vs 'Company'), pick that entry — 'JAVIER SANCHEZ' printed means the entry 'Javier Sanchez'. "
+                     "Leave it out only if none of them is named on the document.")
+        else:
+            desc += " Leave OUT unless one of these values is actually printed or clearly indicated on the document."
         if any(any(ch.isdigit() for ch in v) for v in f["list"]):
             desc += (" These values carry a code/number: pick the one whose NUMBER matches the number printed on the document "
                      "(ignore leading zeros, e.g. printed '0010' = 'Lot 010'); a matching name with a different number is WRONG — leave the field out instead.")
