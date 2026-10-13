@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -438,7 +439,7 @@ async def api_upload(request: Request, files: list[UploadFile] = File(...), spli
             mp = WORK / job_id / "meta.json"
             _write_meta(mp, {**json.loads(mp.read_text()), "split": True})
         ids.append(job_id)
-        _bf_queue.put(("job", job_id, owner))
+        _enqueue(("job", job_id, owner))
     _bf_state["queued"] += len(ids)
     return {"queued": len(ids), "ids": ids, "skipped": skipped}
 
@@ -745,7 +746,7 @@ async def api_lf_read(request: Request):
     mode = "overwrite" if req.mode == "overwrite" else "keep"
     n = 0
     for eid in docs:
-        _bf_queue.put(("direct", eid, who, mode))
+        _enqueue(("direct", eid, who, mode))
         n += 1
     _bf_state["queued"] += n
     return {"queued": n, "acting_as": who, "mode": mode}
@@ -926,7 +927,33 @@ def _direct_one(entry_id: int, who: str, mode: str) -> None:
 
 
 # ---------- backfill: documents already in Laserfiche ----------
-_bf_queue: "queue.Queue[tuple]" = queue.Queue()
+# Work queue: (priority, seq, item). Lower priority number = served first.
+#   0 = started by a person in Laserfiche (business process)   1 = a person's upload   2 = bulk folder read (From Laserfiche)
+_bf_queue: "queue.PriorityQueue[tuple]" = queue.PriorityQueue()
+_seq = itertools.count()
+PRIO = {"direct": 0, "job": 1, "lf": 2}
+
+
+def _enqueue(item: tuple) -> None:
+    _bf_queue.put((PRIO.get(item[0], 2), next(_seq), item))
+    _maybe_grow_pool()
+
+
+WORKERS_MIN = int(os.environ.get("BACKFILL_WORKERS", "3"))
+WORKERS_MAX = int(os.environ.get("BACKFILL_MAX_WORKERS", "8"))
+WORKER_IDLE_EXIT = int(os.environ.get("BACKFILL_IDLE_EXIT", "90"))     # seconds an extra reader may sit idle before leaving
+_pool_lock = threading.Lock()
+_pool_size = 0
+
+
+def _maybe_grow_pool() -> None:
+    """Add a reader while there is a backlog and we are under the ceiling."""
+    global _pool_size
+    with _pool_lock:
+        if _bf_queue.qsize() > 0 and _pool_size < WORKERS_MAX:
+            _pool_size += 1
+            threading.Thread(target=_backfill_worker, args=(True,), daemon=True, name=f"reader-extra-{_pool_size}").start()
+            logging.getLogger("lf-capture").info("backlog %d: reader pool grown to %d", _bf_queue.qsize(), _pool_size)
 _bf_state = {"queued": 0, "done": 0, "failed": 0, "errors": []}
 _bf_seen: set[int] = set()
 
@@ -972,7 +999,7 @@ def api_backfill_queue(req: QueueRequest, request: Request):
         if eid in _bf_seen:
             continue
         _bf_seen.add(eid)
-        _bf_queue.put(("lf", eid, email, mode))
+        _enqueue(("lf", eid, email, mode))
         n += 1
     _bf_state["queued"] += n
     return {"queued": n}
@@ -980,7 +1007,7 @@ def api_backfill_queue(req: QueueRequest, request: Request):
 
 @app.get("/api/backfill/status")
 def api_backfill_status():
-    return {**_bf_state, "pending": _bf_queue.qsize(), "errors": _bf_state["errors"][-10:]}
+    return {**_bf_state, "pending": _bf_queue.qsize(), "readers": _pool_size, "errors": _bf_state["errors"][-10:]}
 
 
 def _backfill_one(entry_id: int, email: str, mode: str = "keep") -> None:
@@ -1052,7 +1079,7 @@ def _process_upload(job_id: str, user: str) -> None:
                 child = _new_job(part, f"{base} [{rng}]", context=f"Split from a scanned batch '{base}' ({pages} pages); this part: {sg.get('what', '')}", owner=user)
                 cm = WORK / child / "meta.json"
                 _write_meta(cm, {**json.loads(cm.read_text()), "split_from": job_id, "part": i, "parts": len(segs)})
-                _bf_queue.put(("job", child, user))
+                _enqueue(("job", child, user))
             shutil.rmtree(d, ignore_errors=True)
             return
     result = _run_extract(job_id, None, lf)
@@ -1068,10 +1095,17 @@ def _process_upload(job_id: str, user: str) -> None:
                 mm = json.loads(mp.read_text()); mm["notes"] = f"Not auto-filed: {getattr(e, 'detail', e)}. " + (mm.get("notes") or ""); _write_meta(mp, mm)
 
 
-def _backfill_worker():
+def _backfill_worker(elastic: bool = False):
+    global _pool_size
     while True:
-        item = _bf_queue.get()
-        logging.getLogger("lf-capture").info("reading %s %s (pending after this: %d)", item[0], item[1], _bf_queue.qsize())
+        try:
+            _, _, item = _bf_queue.get(timeout=WORKER_IDLE_EXIT if elastic else None)
+        except queue.Empty:
+            with _pool_lock:
+                _pool_size -= 1
+                logging.getLogger("lf-capture").info("idle: reader pool shrunk to %d", _pool_size)
+            return
+        logging.getLogger("lf-capture").info("reading %s %s (pending after this: %d, readers: %d)", item[0], item[1], _bf_queue.qsize(), _pool_size)
         try:
             if item[0] == "job":
                 _, job_id, user = item
@@ -1116,8 +1150,10 @@ def _start_mail():
         mailbox.start_if_configured(_from_mailbox)
     elif os.environ.get("MAIL_MAILBOX"):
         logging.getLogger("lf-capture").warning("MAIL_MAILBOX is set but LF_USERNAME/LF_PASSWORD (service account) is not; mailbox capture disabled")
-    for i in range(int(os.environ.get("BACKFILL_WORKERS", "3"))):
-        threading.Thread(target=_backfill_worker, daemon=True, name=f"backfill-{i}").start()
+    global _pool_size
+    for i in range(WORKERS_MIN):
+        threading.Thread(target=_backfill_worker, daemon=True, name=f"reader-{i}").start()
+    _pool_size = WORKERS_MIN
 
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
